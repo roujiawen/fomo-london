@@ -63,11 +63,26 @@ DB_CONFIG = {
 
 
 def get_db_config():
-    """Get database config based on environment."""
+    """Get database config based on environment.
+
+    Environment variables DB_HOST / DB_NAME / DB_USER / DB_PASSWORD, when set,
+    override the selected profile. This lets a deployment (e.g. the VM) point the
+    pipeline at a password-protected DB user without editing this file; a local
+    checkout with none of them set keeps the historic root/no-password defaults.
+    """
     env = os.environ.get('FOMO_ENV', 'local')
     if env not in DB_CONFIG:
         env = 'local'
-    return DB_CONFIG[env]
+    config = dict(DB_CONFIG[env])
+    if os.environ.get('DB_HOST'):
+        config['host'] = os.environ['DB_HOST']
+    if os.environ.get('DB_NAME'):
+        config['database'] = os.environ['DB_NAME']
+    if os.environ.get('DB_USER'):
+        config['user'] = os.environ['DB_USER']
+    if 'DB_PASSWORD' in os.environ:
+        config['password'] = os.environ['DB_PASSWORD']
+    return config
 
 
 def create_connection():

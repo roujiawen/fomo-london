@@ -55,19 +55,19 @@ echo "    detected PHP ${PHP_VER} (fpm sock: ${PHP_SOCK})"
 # ----------------------------------------------------------------------------
 echo "==> [2/8] MariaDB database + users"
 systemctl enable --now mariadb
-# MariaDB binds to 127.0.0.1 only by default, so root@127.0.0.1 is not remotely
-# reachable. The pipeline (db.py, FOMO_ENV=local) connects as root over TCP with
-# an empty password — we grant exactly that, localhost-only, to avoid a code change.
-# PHP connects as a password-protected app user.
+# One password-protected app user (${DB_APP_USER}) serves BOTH the PHP api/admin
+# (config.php) and the Python pipeline (db.py via DB_* env vars in .env). We do NOT
+# use root: on Linux root@localhost is socket-only auth, and MariaDB reverse-resolves
+# 127.0.0.1 -> localhost, so a TCP root login can never match. CREATE OR REPLACE USER
+# makes the password deterministic across re-runs (plain CREATE ... IF NOT EXISTS
+# leaves a stale password from an earlier run, desyncing it from config.php/.env).
 #
 # --default-character-set=utf8mb4 is REQUIRED on every load: the mariadb client's
 # connection charset defaults to utf8mb3 on a stock Ubuntu box, which rejects the
 # 4-byte emoji in the seed/config data ("ERROR 1366 Incorrect string value").
 mariadb --default-character-set=utf8mb4 <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO 'root'@'127.0.0.1';
-CREATE USER IF NOT EXISTS '${DB_APP_USER}'@'localhost' IDENTIFIED BY '${DB_APP_PASS}';
+CREATE OR REPLACE USER '${DB_APP_USER}'@'localhost' IDENTIFIED BY '${DB_APP_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_APP_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
@@ -98,6 +98,11 @@ if [ ! -f "${REPO_DIR}/.env" ]; then
   cat > "${REPO_DIR}/.env" <<ENV
 FOMO_CITY="${FOMO_CITY}"
 FOMO_ENV="local"
+# Pipeline DB credentials — db.py reads these env overrides (same app user as PHP).
+DB_HOST="localhost"
+DB_NAME="${DB_NAME}"
+DB_USER="${DB_APP_USER}"
+DB_PASSWORD="${DB_APP_PASS}"
 GEMINI_API_KEY="${GEMINI_API_KEY}"
 GEMINI_MODEL="${GEMINI_MODEL}"
 GEMINI_TIMEOUT=300
