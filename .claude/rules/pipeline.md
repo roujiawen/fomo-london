@@ -51,6 +51,16 @@ All intermediate data lives in the database (not files).
 2. ≥ 2 successful crawls of the website since the event was last seen (protects monthly/annual-cadence sites from one-missed-extraction archival),
 3. no `start_too_future` rejection matching the event's name from that website in the last 14 days — an extraction rejected only for being beyond `FUTURE_WINDOW_DAYS` means the event is still listed on the page (e.g. Storm King's September program crawled in June).
 
+### Dead-link fast path (`pipeline/liveness_probe.py`)
+
+The grace above keeps a dead link on the map for ~2 weeks when a site *unpublishes* an event mid-run (parks.ny.gov, 2026-09-10: Shark Shack vanished from the listing and its page began answering 403 "Oops, lost your way?"). A gone detail page is stronger evidence than a missed listing, so right after the merge the tail probes the events the grace is holding open and archives the ones whose own pages are confirmed gone:
+
+- **Candidates** = active, future occurrence, and some enabled evidence-bearing source website's latest **merged** crawl (`crawl_results.merged_at`, not `processed_at` — a processed-but-unmerged crawl from a concurrent run makes everything it lists look dropped) is newer than the event's last confirmation anywhere. Instagram-only / `rotating_listing` / `skip_reenrichment` sites never count as the dropper. If that crawl still lists one of the event's URLs under another row (split series, re-slug twin) the event is `alive` with no fetch.
+- **Verdict per URL** via the crawl browser with the website's own settings: `dead` on 404/410, a tombstone `<title>` (any status), a soft-404 body, or a redirect to the site root; `unknown` on a bot challenge / 401/403/429/5xx without a tombstone / timeout. A past dated-instance URL (`/event/<slug>/2026-08-27/`) is only evidence together with its undated series page, which is probed too.
+- **Control gate**: one URL the same website's latest crawl lists for a still-active event must come back `alive` in the same run, or every dead verdict for that website is discarded (walls answer every path alike). No control URL = no archival.
+- **Archive** only when every probed URL is dead and the control passed; bypasses the 14-day grace and the stale-sibling rule. Verdicts land in `event_liveness_probes` (rate-limits re-probes to 7 days; explains the archival in triage).
+- **Budget**: 100 events/run, 10 per website (round-robin, soonest next occurrence first), 3 URLs per event, 15-minute wall clock. Standalone: `./venv/bin/python pipeline/liveness_probe.py [--dry-run] [--event-ids a,b]` — an explicit id list bypasses the window and the re-probe interval (manual "probe these now"). First live run 2026-09-10: 100 fetched events → 12 dead (all hand-verified), 3 unknown; ~1,000 events sit in the window at any time, ~25% of them still listed under another row.
+
 ## Detail Crawl (Step 5)
 
 Some events get "No description available." because the listing page lacked details. The detail crawl step crawls their individual event URLs to extract descriptions, tags, and emoji — updating `crawl_events` before the merger reads them.
@@ -82,12 +92,12 @@ Some events get "No description available." because the listing page lacked deta
 - `llm_providers.py` — provider-agnostic structured JSON generation for the **single-call path only** (see Provider split above); translates any provider error into `ProviderCallFailure`, which `extractor` re-raises as `ExtractionCallFailure` so a failed call is stored as `status='failed'` (content preserved) rather than an events-less zero
 - `processor.py` — Markdown parsing, text utilities, tag processing, detail crawl orchestration (Step 5); location/tag token lists from `city_config`
 - `merger.py` — Event deduplication
-- `exporter.py` — JSON export to per-day chunks (`events.day0..day3.json` + `events.remainder.json`, matching `locations.*.json` and `events.*.desc.json` description companions, plus `organizers.json` and `manifest.json` mapping day index → calendar date). Also the weekly public NDJSON dataset (see below).
+- `exporter.py` — JSON export to per-day chunks (`events.day0..day3.json` + `events.remainder.json`, matching `locations.*.json` and `events.*.desc.json` description companions, plus `organizers.json` and `manifest.json` mapping day index → calendar date). Also the public NDJSON dataset (manual only, see below).
 - `uploader.py` — FTP upload (`upload()` for the frontend data files; `upload_public_dataset()` for the NDJSON export, which uses the `PUBLIC_HTML_FTP_USER` account since the data account is chrooted away from `public_html/`)
 - `db.py` — Database connection and all DB operations
 - `frequency_analyzer.py` — Crawl frequency analysis
 
-## Public NDJSON dataset export (weekly)
+## Public NDJSON dataset export (manual — weekly run disabled)
 
 Two consumer-facing datasets served at `https://fomo.nyc/exports/`:
 
@@ -97,8 +107,8 @@ Two consumer-facing datasets served at `https://fomo.nyc/exports/`:
 
 One JSON object per line: `event_id, name, [short_name], [event_type], [emoji], [description], location{location_id, name, [address], [sublocation], lat, lng}, occurrences[{start_date, start_time, end_date, end_time}], urls[], tags[], [organizers[{name, url}]]`.
 
-- Runs automatically in the pipeline tail (Step 8b, also in `--merge-only`) when the newest dated upcoming snapshot in local `exports/` is ≥ 7 days old — **the local dated files are the scheduling state**; a failed upload deletes the fresh snapshot so the next run retries. Non-fatal to the pipeline.
-- Force anytime: `./venv/bin/python pipeline/main.py --export-dataset`.
+- **Automatic weekly run DISABLED 2026-09-12.** The pipeline tail (and `--merge-only`) no longer calls `run_public_dataset_export`; the code, the 7-day gate (`exporter.should_export_public_dataset`, keyed on the newest dated snapshot in local `exports/`) and the tests remain for a future re-enable — restore the single call at the end of `main.run_publish_tail` to turn it back on.
+- Run manually anytime: `./venv/bin/python pipeline/main.py --export-dataset`.
 - Eligibility (both datasets): not suppressed, mapped location with coordinates, ≥ 1 URL, aggregator trust gate; upcoming additionally requires not archived. Organizer attribution resolves to roots and drops aggregators, like `organizers.json`. Occurrences are deduped (exact + contained same-time spans).
 - **The schema only changes additively** — bump `exporter.PUBLIC_EXPORT_SCHEMA_VERSION` on any breaking change. Tests: `pipeline/tests/test_public_export.py`.
 - The pre-existing one-off `june_events.ndjson` / `june_events.csv` also live in remote `exports/` — unrelated to this pipeline, left in place.

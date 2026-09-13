@@ -68,11 +68,14 @@ document.addEventListener('DOMContentLoaded', () => {
             tagParentsOf: {},
             tagChildrenOf: {},
             tagEmojiMap: {},
+            tagIconMap: {},
+            tagSearchTerms: {},
             locationsByLatLng: {},
             tagFrequencies: {},
             datePickerInstance: null,
             allAvailableTags: [],
             eventTagIndex: {},
+            allEventsFilteredByDate: [],
             allEventsFilteredByDateAndLocation: [],
             geotagsSet: new Set(),
             eventsByLatLngInDateRange: {},
@@ -197,17 +200,36 @@ document.addEventListener('DOMContentLoaded', () => {
             const manifest = await this._loadDataFile(this.config.MANIFEST_URL);
 
             this.state.manifest = manifest || { days: [] };
+            // An older cached app may have saved a new manifest but downloaded
+            // only the legacy remainder. Keep that complete snapshot usable offline.
+            if (this.state.dataFromCache && manifest?.remainderChunks?.length) {
+                const required = manifest.remainderChunks.flatMap(c => [
+                    `${this.config.DATA_DIR}events.${c}.json`,
+                    `${this.config.DATA_DIR}events.${c}.desc.json`
+                ]);
+                const legacy = `${this.config.DATA_DIR}events.remainder.json`;
+                const present = await DataCache.hasKeys([...required, legacy]);
+                if (present.has(legacy) && required.some(url => !present.has(url))) {
+                    this.state.manifest = { ...manifest, remainderChunks: undefined };
+                }
+            }
             this.state.loadedChunks = new Set();
 
-            // Step 2: Pick the chunk matching today's date. If today isn't in
-            // the manifest (export is older than NUM_DAY_CHUNKS days), fall
-            // back to remainder so the user still sees recent + future events.
+            // Step 2: Load complete coverage of the URL's date range (or today).
+            // Dates outside the manifest's day files require the tail partitions.
             const todayStr = Utils.getTodayInZone();
             this.state.todayStr = todayStr;
-            const dayIndex = (this.state.manifest.days || []).indexOf(todayStr);
-            const initChunk = dayIndex >= 0 ? `day${dayIndex}` : this.config.REMAINDER_CHUNK;
-            this.state.initChunk = initChunk;
-            this.state.loadedChunks.add(initChunk);
+            const urlStart = this.state.urlParams?.start;
+            const urlEnd = this.state.urlParams?.end;
+            const end = urlEnd ? URLParams.formatDate(urlEnd) : null;
+            const start = urlStart && (!end || end >= todayStr)
+                ? URLParams.formatDate(urlStart) : todayStr;
+            // Publish the complete requested date range on the first render.
+            // Other dates can load without replacing this view afterwards.
+            const requestedStart = start < todayStr ? todayStr : start;
+            const initChunks = this._chunksForDates(requestedStart, end && end >= requestedStart ? end : requestedStart);
+            this.state.initChunks = initChunks;
+            initChunks.forEach(c => this.state.loadedChunks.add(c));
 
             // Step 3: Fetch everything else in a SINGLE parallel batch. The heavy
             // events chunk (~330 KB gz) now downloads concurrently with the
@@ -218,8 +240,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 this._loadDataFile(this.config.TAG_CONFIG_URL),
                 this._loadDataFile(this.config.TAG_HIERARCHY_URL),
                 this._loadDataFile(this.config.ORGANIZERS_URL),
-                this._loadDataFile(`${this.config.DATA_DIR}events.${initChunk}.json`),
-                this._loadDataFile(`${this.config.DATA_DIR}locations.${initChunk}.json`)
+                Promise.all(initChunks.map(c => this._loadDataFile(`${this.config.DATA_DIR}events.${c}.json`))).then(parts => parts.flat()),
+                Promise.all([...new Set(initChunks.map(c => this._locationChunk(c)))].map(c =>
+                    this._loadDataFile(`${this.config.DATA_DIR}locations.${c}.json`))).then(parts => parts.flat())
             ]);
             this.state.organizersById = organizersData || {};
 
@@ -233,6 +256,14 @@ document.addEventListener('DOMContentLoaded', () => {
             this.state.tagParentsOf = hierarchyMaps.parentsOf;
             this.state.tagChildrenOf = hierarchyMaps.childrenOf;
             this.state.tagEmojiMap = hierarchyMaps.tagEmojiMap;
+            this.state.tagIconMap = hierarchyMaps.tagIconMap;
+            this.state.tagSearchTerms = hierarchyMaps.tagSearchTerms;
+            this.state.formats = hierarchyMaps.formats;
+            this.state.formatOnlyTags = hierarchyMaps.formatOnlyTags;
+            this.state.neighborhoodTags = new Set([...hierarchyMaps.neighborhoodTags, ...(tagConfig.geotags || []).filter(tag => hierarchyMaps.hierarchyTagsSet.has(tag))]);
+            this.state.tagRedirects = hierarchyMaps.tagRedirects;
+            DiscoveryRanking.migrateTagAliases(this.state.tagRedirects);
+            IconManager.setTagIcons(this.state.tagIconMap, this.state.tagEmojiMap);
 
             // Organizers participate in the tag filter system as namespaced
             // pseudo-tags (e.g. "organizer:123"). Register their names and fold
@@ -242,6 +273,7 @@ document.addEventListener('DOMContentLoaded', () => {
             for (const [id, org] of Object.entries(this.state.organizersById)) {
                 const orgTag = Utils.makeOrganizerTag(id);
                 if (orgTag && org && org.emoji) this.state.tagEmojiMap[orgTag] = org.emoji;
+                if (orgTag && org?.icon_id) this.state.tagIconMap[orgTag] = org.icon_id;
             }
 
             // Initialize TagColorManager with color palettes. Emoji colors are
@@ -252,11 +284,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 tagEmojiMap: this.state.tagEmojiMap
             });
 
-            DataManager.processInitialData(initEventData, initLocationData, this.state, this.config);
+            DataManager.processInitialData([], initLocationData, this.state, this.config);
+            await DataManager.processFullDataAsync(initEventData, [], this.state, this.config);
             DataManager.calculateTagFrequencies(this.state);
             DataManager.processTagHierarchy(this.state, this.config);
             DataManager.buildTagIndex(this.state);
-            DataManager.buildSearchIndex(this.state);
+            await DataManager.buildSearchIndexAsync(this.state);
         },
 
         /**
@@ -270,15 +303,13 @@ document.addEventListener('DOMContentLoaded', () => {
             // (and kick off the base map's style/tile/glyph downloads) in PARALLEL
             // with _loadInitialData() instead of waiting for it. The base map needs
             // only the theme (for its style URL) and the initial center/zoom.
-            this.initEmojiManager();
-            EmojiManager.initEmojiFont();
+            IconManager.init();
             this.initThemeManager();
             ThemeManager.initTheme();
 
-            // The map-label webfont (and any theme font, e.g. the pixel
-            // theme's) must be loaded before the map bakes its TinySDF glyph
+            // The map-label webfont must be loaded before the map bakes its TinySDF glyph
             // atlas, or labels render in the fallback font until reload.
-            await ThemeManager.loadThemeFonts(Utils.getCurrentTheme());
+            await ThemeManager.loadMapFont();
 
             this.initMap();
             // Search/filter managers must be ready before the map can fire a
@@ -304,6 +335,23 @@ document.addEventListener('DOMContentLoaded', () => {
          * @private
          */
         _setupUIComponents(urlParams) {
+            FormatSelector.configure(this.state.formats);
+            NeighborhoodSelector.configure(this.state.tagChildrenOf, this.state.neighborhoodTags);
+            urlParams.tags = (urlParams.tags || []).map(t => this.state.tagRedirects[t] || t);
+            const legacyNeighborhoods = (urlParams.tags || []).filter(t => this.state.neighborhoodTags.has(t));
+            const legacyFormats = (urlParams.tags || []).filter(t => this.state.formatOnlyTags.has(t));
+            urlParams.tags = [...new Set((urlParams.tags || [])
+                .filter(t => !this.state.formatOnlyTags.has(t) && !this.state.neighborhoodTags.has(t))
+                .map(t => this.state.tagRedirects[t] || t))];
+            FormatSelector.init(this.state.formats, urlParams.formats ?? (legacyFormats.length ? FormatSelector.fromLegacyTags(legacyFormats) : null), () => {
+                this._requestFilterUpdate(true);
+                HistoryManager.push();
+            });
+            NeighborhoodSelector.init(this.state.tagChildrenOf, this.state.neighborhoodTags,
+                urlParams.neighborhoods ?? (legacyNeighborhoods.length ? NeighborhoodSelector.fromLegacyTags(legacyNeighborhoods) : null), () => {
+                    this._requestFilterUpdate(true);
+                    HistoryManager.push();
+                });
             // Apply URL parameter tag selections before date picker init
             // This ensures tags are selected when the date picker triggers initial filtering
             if (urlParams.tags && urlParams.tags.length > 0) {
@@ -315,13 +363,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     const [newStart, newEnd] = selectedDates;
                     const [oldStart, oldEnd] = this.state.lastSelectedDates;
 
-                    if (oldStart && oldEnd && newStart.getTime() === oldStart.getTime() && newEnd.getTime() === oldEnd.getTime()) {
+                    if (oldStart && oldEnd && newStart && newEnd && newStart.getTime() === oldStart.getTime() && newEnd.getTime() === oldEnd.getTime()) {
                         return;
                     }
 
                     this.state.lastSelectedDates = selectedDates;
                     // During init, skip display — filterAndDisplayEvents is called explicitly after map loads
-                    this.updateFilteredEventList({ skipDisplay: this.state.isInitialLoad });
+                    if (this.state.isInitialLoad) this.updateFilteredEventList({ skipDisplay: true });
+                    else this._requestFilterUpdate(true);
 
                     HistoryManager.push();
                 }
@@ -333,48 +382,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 onShareView: () => this.shareCurrentView()
             });
             ModalManager.initSettingsModal({
-                onEmojiFontChange: (emojiFont) => {
-                    const statusElement = document.getElementById('emoji-font-status');
-                    EmojiManager.applyEmojiFont(emojiFont, statusElement);
-                },
                 onThemeChange: (theme) => {
                     ThemeManager.applyThemeChange(theme);
-                },
-                // Prototype theme/layout options are debug-gated (type
-                // "debug" in search to toggle)
-                getDebugMode: () => this.state.debugMode
+                }
             });
             // Note: Welcome modal is initialized earlier in init() so it can be closed during loading
             FeedbackManager.init();
-            this._initProtoFlagListeners();
-            if (ProtoFlags.pickerRequested()) {
-                ProtoPanel.init({
-                    onThemeSelect: (name) => ThemeManager.applyThemeChange(name)
-                });
-            }
-        },
-
-        /**
-         * React to live prototype-flag toggles (from the prototype picker).
-         * `layout` is reload-required and deliberately not handled here.
-         * @memberof App
-         * @private
-         */
-        _initProtoFlagListeners() {
-            document.addEventListener('protoflagschange', (e) => {
-                const { name } = e.detail || {};
-                if (name === 'chips') {
-                    FilterPanelUI.renderChipBar();
-                } else if (name === 'popups') {
-                    // Close whichever popup surface is open so the next marker
-                    // click uses the newly selected routing.
-                    const popup = MapManager.getCurrentPopup();
-                    if (popup) popup.remove();
-                    if (typeof Sheet.closeDetail === 'function' && Sheet.isDetailMode()) {
-                        Sheet.closeDetail();
-                    }
-                }
-            });
         },
 
         /**
@@ -428,111 +441,150 @@ document.addEventListener('DOMContentLoaded', () => {
             const FP = (typeof window !== 'undefined' && window.FilterProfiler) || null;
             const profile = FP && FP.enabled;
             if (profile) FP.start('Phase 2: full data load');
+            const pendingUrlTags = new Set((urlParams.tags || []).filter(
+                tag => !this.state.allAvailableTags.includes(tag)));
 
             const indicator = document.getElementById('phase2-loading-indicator');
-            if (indicator) indicator.classList.add('visible');
+            if (indicator) {
+                indicator.classList.remove('done');
+                indicator.classList.add('visible');
+            }
 
             try {
                 if (profile) FP.mark('fp:p2:fetch-start');
 
                 // Build list of chunks not yet loaded: every day chunk in the
                 // manifest plus the remainder, minus whichever one Phase 1
-                // already grabbed. Fetched in parallel; HTTP/2 multiplexes.
-                const allChunks = (this.state.manifest.days || []).map((_, i) => `day${i}`);
-                allChunks.push(this.config.REMAINDER_CHUNK);
-                const remainingChunks = allChunks.filter(c => !this.state.loadedChunks.has(c));
-
-                const fetches = [];
-                for (const chunk of remainingChunks) {
-                    fetches.push(this._loadDataFile(`${this.config.DATA_DIR}events.${chunk}.json`));
-                    fetches.push(this._loadDataFile(`${this.config.DATA_DIR}locations.${chunk}.json`));
-                }
-                // Description companions download in parallel; applied after the
-                // events are merged (so ids resolve) and before the search index
-                // is built, so Phase-2 descriptions are searchable immediately.
-                const descPromise = this._fetchChunkDescriptions(remainingChunks);
-                const fetched = await Promise.all(fetches);
-
-                const fullEventData = [];
-                const fullLocationData = [];
-                for (let i = 0; i < remainingChunks.length; i++) {
-                    fullEventData.push(...(fetched[i * 2] || []));
-                    fullLocationData.push(...(fetched[i * 2 + 1] || []));
-                    this.state.loadedChunks.add(remainingChunks[i]);
-                }
-                if (profile) {
-                    FP.mark('fp:p2:fetch-end');
-                    FP.measure('fp:p2:fetch+parse', 'fp:p2:fetch-start', 'fp:p2:fetch-end');
-                }
-
-                // Chunked merge — yields to main thread between batches so map clicks
-                // and typing stay responsive during the heavy ~30k-event processing.
-                await DataManager.processFullDataAsync(
-                    fullEventData,
-                    fullLocationData,
-                    this.state,
-                    this.config,
-                    (done, total) => {
-                        if (indicator) {
-                            const pct = Math.round((done / total) * 100);
-                            indicator.querySelector('.phase2-progress').textContent = `${pct}%`;
+                // already grabbed. Fetch nearby dates first with bounded concurrency.
+                const allChunks = this._dataChunks(this.state.manifest);
+                const remaining = allChunks.filter(c => !this.state.loadedChunks.has(c) &&
+                    !(c.startsWith('remainder') && this.state.loadedChunks.has('remainder')));
+                // Publish nearby day chunks before downloading the distant tail.
+                const groups = [remaining.filter(c => c.startsWith('day')),
+                    remaining.filter(c => !c.startsWith('day'))].filter(g => g.length);
+                let downloaded = 0;
+                const totalFiles = remaining.length * 2 + new Set(remaining.map(c => this._locationChunk(c))).size;
+                const load = async (url) => {
+                    const data = await this._loadDataFile(url);
+                    downloaded++;
+                    if (indicator) indicator.querySelector('.phase2-progress').textContent =
+                        `${Math.round(downloaded / totalFiles * 100)}%`;
+                    return data;
+                };
+                for (const remainingChunks of groups) {
+                    if (profile) FP.mark('fp:p2:fetch-start');
+                    if (indicator) indicator.querySelector('.phase2-label').textContent =
+                        'Showing available events · loading more dates';
+                    const fullEventData = [], fullLocationData = [], descriptions = [];
+                    const locationLoads = new Map();
+                    const batches = new Map();
+                    // Bounded concurrency keeps small requested-day files ahead
+                    // of the tail instead of flooding the connection with it.
+                    const queue = [...remainingChunks];
+                    const fetchNext = async () => {
+                        while (queue.length) {
+                            const selected = this.state.datePickerInstance?.selectedDates?.[0];
+                            const day = selected ? URLParams.formatDate(selected) : '';
+                            const preferred = `day${(this.state.manifest.days || []).indexOf(day)}`;
+                            const index = Math.max(0, queue.indexOf(preferred));
+                            const chunk = queue.splice(index, 1)[0];
+                            const locationChunk = this._locationChunk(chunk);
+                            if (!locationLoads.has(locationChunk)) {
+                                locationLoads.set(locationChunk, load(`${this.config.DATA_DIR}locations.${locationChunk}.json`));
+                            }
+                            const [events, desc] = await Promise.all([
+                                load(`${this.config.DATA_DIR}events.${chunk}.json`),
+                                load(`${this.config.DATA_DIR}events.${chunk}.desc.json`),
+                                locationLoads.get(locationChunk)
+                            ]);
+                            batches.set(chunk, { events, desc });
                         }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, fetchNext));
+                    for (const locations of await Promise.all(locationLoads.values())) fullLocationData.push(...(locations || []));
+                    for (const chunk of remainingChunks) {
+                        const { events, desc } = batches.get(chunk);
+                        fullEventData.push(...(events || []));
+                        descriptions.push(desc);
                     }
-                );
-                if (profile) {
-                    FP.mark('fp:p2:processFullData');
-                    FP.measure('fp:p2:processFullData', 'fp:p2:fetch-end', 'fp:p2:processFullData');
-                }
+                    if (indicator) indicator.querySelector('.phase2-label').textContent = 'Preparing more events';
+                    if (profile) {
+                        FP.mark('fp:p2:fetch-end');
+                        FP.measure('fp:p2:fetch+parse', 'fp:p2:fetch-start', 'fp:p2:fetch-end');
+                    }
 
-                // Merge descriptions before the search index is (re)built below.
-                this._applyChunkDescriptions(await descPromise, false);
+                    // Chunked merge — yields to main thread between batches so map clicks
+                    // and typing stay responsive during the heavy ~30k-event processing.
+                    await DataManager.processFullDataAsync(
+                        fullEventData,
+                        fullLocationData,
+                        this.state,
+                        this.config,
+                        (done, total) => {
+                            if (indicator) {
+                                const pct = Math.round((done / total) * 100);
+                                indicator.querySelector('.phase2-progress').textContent = `${pct}%`;
+                            }
+                        }
+                    );
+                    if (profile) {
+                        FP.mark('fp:p2:processFullData');
+                        FP.measure('fp:p2:processFullData', 'fp:p2:fetch-end', 'fp:p2:processFullData');
+                    }
 
-                DataManager.calculateTagFrequencies(this.state);
-                DataManager.processTagHierarchy(this.state, this.config);
-                if (profile) {
-                    FP.mark('fp:p2:tagHier');
-                    FP.measure('fp:p2:tagFreq+hierarchy', 'fp:p2:processFullData', 'fp:p2:tagHier');
-                }
+                    // Merge descriptions before the search index is (re)built below.
+                    this._applyChunkDescriptions(descriptions, false);
+                    remainingChunks.forEach(c => this.state.loadedChunks.add(c));
 
-                // Yield once before the next big block so any pending input fires.
-                await new Promise(r => setTimeout(r, 0));
+                    DataManager.calculateTagFrequencies(this.state);
+                    DataManager.processTagHierarchy(this.state, this.config);
+                    if (profile) {
+                        FP.mark('fp:p2:tagHier');
+                        FP.measure('fp:p2:tagFreq+hierarchy', 'fp:p2:processFullData', 'fp:p2:tagHier');
+                    }
 
-                await DataManager.buildSearchIndexAsync(this.state);
-                if (profile) {
-                    FP.mark('fp:p2:searchIndex');
-                    FP.measure('fp:p2:buildSearchIndex', 'fp:p2:tagHier', 'fp:p2:searchIndex');
-                }
+                    // Yield once before the next big block so any pending input fires.
+                    await new Promise(r => setTimeout(r, 0));
 
-                await MapManager.loadEmojiImagesChunked(this.state.locationsByLatLng);
-                if (profile) {
-                    FP.mark('fp:p2:emoji');
-                    FP.measure('fp:p2:loadEmojiImages', 'fp:p2:searchIndex', 'fp:p2:emoji');
-                }
+                    await DataManager.buildSearchIndexAsync(this.state);
+                    if (profile) {
+                        FP.mark('fp:p2:searchIndex');
+                        FP.measure('fp:p2:buildSearchIndex', 'fp:p2:tagHier', 'fp:p2:searchIndex');
+                    }
 
-                this.updateFilteredEventList({ skipDisplay: true });
-                // Lightweight refresh — preserves user selections made during Phase 1
-                // and avoids re-instantiating SectionRenderer / GestureHandler / etc.
-                FilterPanelUI.refreshAvailableTags({
-                    allAvailableTags: this.state.allAvailableTags,
-                    initialGlobalFrequencies: this.state.tagFrequencies
-                });
-                if (profile) {
-                    FP.mark('fp:p2:initPanel');
-                    FP.measure('fp:p2:filterList+refreshPanel', 'fp:p2:emoji', 'fp:p2:initPanel');
-                }
+                    // Artwork is loaded lazily for visible icons by IconManager.
+                    if (profile) {
+                        FP.mark('fp:p2:emoji');
+                        FP.measure('fp:p2:iconScheduling', 'fp:p2:searchIndex', 'fp:p2:emoji');
+                    }
 
-                // Re-apply URL-param tag selections — these might reference tags
-                // that didn't exist in Phase 1 and were skipped earlier. Idempotent
-                // for tags that were already selected.
-                if (urlParams.tags && urlParams.tags.length > 0) {
-                    FilterPanelUI.selectTags(urlParams.tags, (tag) => TagColorManager.assignColorToTag(tag));
-                }
+                    // Background arrivals become visible on the next interaction.
+                    // Keep the current map/list stable while other dates load.
+                    this._dataViewPending = true;
+                    if (profile) {
+                        FP.mark('fp:p2:initPanel');
+                        FP.measure('fp:p2:filterList+refreshPanel', 'fp:p2:emoji', 'fp:p2:initPanel');
+                    }
 
-                this.filterAndDisplayEvents();
-                if (profile) {
-                    FP.mark('fp:p2:render');
-                    FP.measure('fp:p2:filterAndDisplayEvents', 'fp:p2:initPanel', 'fp:p2:render');
-                }
+                    // Apply URL tags skipped in Phase 1 only when first available;
+                    // never restore a selection the user has since cleared.
+                    const newlyAvailable = [...pendingUrlTags].filter(tag => this.state.allAvailableTags.includes(tag));
+                    if (newlyAvailable.length) {
+                        FilterPanelUI.selectTags(newlyAvailable, (tag) => TagColorManager.assignColorToTag(tag));
+                        newlyAvailable.forEach(tag => pendingUrlTags.delete(tag));
+                    }
+
+                    // A date change made during loading is an outstanding user
+                    // request: fulfil it once, with its complete date coverage.
+                    if (this._waitingForDateChunks && this._selectedDateChunksReady()) {
+                        this.filterAndDisplayEvents();
+                    }
+                    if (profile) {
+                        FP.mark('fp:p2:render');
+                        FP.measure('fp:p2:filterAndDisplayEvents', 'fp:p2:initPanel', 'fp:p2:render');
+                    }
+
+                } // Each group becomes usable before loading the next one.
 
                 if (indicator) {
                     indicator.classList.remove('visible');
@@ -578,6 +630,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // decision so a render generation never mixes cached and fresh files.
             this._sessionHashes = new Map();
             this._cachePutPromises = [];
+            PreferenceUI.init(() => this.state);
+            document.addEventListener('fomo:preferences-changed', () => {
+                if (!this.state.isInitialLoad) this._requestFilterUpdate();
+            });
             await DataCache.init();
             this.state.dataFromCache = DataCache.isUsable();
 
@@ -617,6 +673,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // (prevents markers over a blank/ocean background). Glyphs/labels
                 // are intentionally NOT awaited here — see initMap's mapLoadPromise.
                 await this.state.mapLoadPromise;
+                // Artwork is loaded lazily for visible icons by IconManager.
                 this._setLoadingProgress(85);
 
                 this.filterAndDisplayEvents();
@@ -628,8 +685,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Initialize browser history for back/forward navigation
                 HistoryManager.init(this.state.map, {
+                    getQuery: () => FomoQueries.query(),
+                    getQueryUrl: () => {
+                        try { if (FomoQueries.active()) return FomoQueries.shareUrl(); } catch (_) { /* Large queries still work without a share link. */ }
+                        const url = new URL(location.href); url.searchParams.delete('q'); url.searchParams.delete('qv'); return url.href;
+                    },
+                    restoreQuery: query => FomoQueries.restore(query),
                     getSelectedLocationKey: () => this.state.selectedLocationKey,
                     getTagStates: () => FilterPanelUI.getTagStates(),
+                    getFormats: () => FormatSelector.selection(),
+                    getNeighborhoods: () => NeighborhoodSelector.selection(),
+                    setNeighborhoods: values => NeighborhoodSelector.setSelection(values),
+                    canonicalTag: tag => this.state.tagRedirects[tag] || tag,
+                    setFormats: values => FormatSelector.setSelection(values),
                     getSelectedDates: () => this.state.datePickerInstance?.selectedDates || [],
                     getSearchTerm: () => this.state.searchTerm,
                     getDatePicker: () => this.state.datePickerInstance,
@@ -674,7 +742,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // map, so they never block time-to-interactive. Merge today's chunk
             // now — search + any open popup pick them up — then go to Phase 2.
             try {
-                if (await this._loadChunkDescriptions([this.state.initChunk], true)) {
+                if (await this._loadChunkDescriptions(this.state.initChunks, true)) {
                     MarkerController.refreshOpenPopupContent();
                 }
             } catch (e) {
@@ -683,6 +751,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // --- Phase 2: Asynchronously Load Full Data ---
             await this._loadFullData(urlParams);
+            FomoQueries.init(this);
 
             // --- Offline/refresh wiring (post-critical-path) ---
             // The service worker registers only now so its shell precache
@@ -757,20 +826,44 @@ document.addEventListener('DOMContentLoaded', () => {
                 const entry = await DataCache.get(url);
                 if (entry) return entry.data;
                 console.warn(`DataCache miss for ${url}; fetching from network.`);
-                return (await DataManager.fetchDataHashed(url)).data;
+                return (await DataManager.fetchDataHashed(url, undefined, { cache: 'no-cache' })).data;
             }
-            const { data, hash } = await DataManager.fetchDataHashed(url);
+            // A schema reset must not refill IndexedDB with stale HTTP-cached JSON.
+            const { data, hash } = await DataManager.fetchDataHashed(url, undefined, { cache: 'no-cache' });
             this._sessionHashes.set(url, hash);
             this._cachePutPromises.push(DataCache.put(url, data, hash));
             return data;
         },
 
-        /**
-         * Every file one export generation must contribute before the cached
-         * snapshot may be used offline. Derived from the loaded manifest.
-         * @returns {string[]}
-         * @private
-         */
+        // Tail partitions share one venue payload to avoid repeated transfers.
+        _locationChunk(chunk) {
+            return /^remainder\d+$/.test(chunk) ? 'remainder' : chunk;
+        },
+
+        _dataChunks(manifest) {
+            const tail = Array.isArray(manifest?.remainderChunks)
+                ? manifest.remainderChunks : [this.config.REMAINDER_CHUNK];
+            return [...(manifest?.days || []).map((_, i) => `day${i}`), ...tail];
+        },
+
+        _chunksForDates(start, end = start) {
+            const days = this.state.manifest?.days || [];
+            const chunks = days.flatMap((day, i) => day >= start && day <= end ? [`day${i}`] : []);
+            const dayCount = Math.round((Date.parse(end) - Date.parse(start)) / 86400000) + 1;
+            if (chunks.length < dayCount || !days.length) {
+                chunks.push(...this._dataChunks(this.state.manifest).filter(c => c.startsWith('remainder')));
+            }
+            return chunks;
+        },
+
+        _selectedDateChunksReady() {
+            const dates = this.state.datePickerInstance?.selectedDates || [];
+            if (!dates.length) return true;
+            return this._chunksForDates(URLParams.formatDate(dates[0]), URLParams.formatDate(dates[1] || dates[0]))
+                .every(c => this.state.loadedChunks.has(c) || (c.startsWith('remainder') && this.state.loadedChunks.has('remainder')));
+        },
+
+        /** Every file required before the loaded snapshot may be used offline. */
         _expectedSnapshotUrls() {
             const urls = [
                 this.config.MANIFEST_URL,
@@ -778,14 +871,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 this.config.TAG_HIERARCHY_URL,
                 this.config.ORGANIZERS_URL
             ];
-            const chunks = (this.state.manifest.days || []).map((_, i) => `day${i}`);
-            chunks.push(this.config.REMAINDER_CHUNK);
+            const chunks = this.state.loadedChunks.has('remainder')
+                ? [...(this.state.manifest.days || []).map((_, i) => `day${i}`), 'remainder']
+                : this._dataChunks(this.state.manifest);
             for (const c of chunks) {
                 urls.push(`${this.config.DATA_DIR}events.${c}.json`);
-                urls.push(`${this.config.DATA_DIR}locations.${c}.json`);
+                urls.push(`${this.config.DATA_DIR}locations.${this._locationChunk(c)}.json`);
                 urls.push(`${this.config.DATA_DIR}events.${c}.desc.json`);
             }
-            return urls;
+            return [...new Set(urls)];
         },
 
         /**
@@ -873,15 +967,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 return result.data;
             };
             const manifest = await fetchOne(this.config.MANIFEST_URL);
-            const chunks = ((manifest && manifest.days) || []).map((_, i) => `day${i}`);
-            chunks.push(this.config.REMAINDER_CHUNK);
+            const chunks = this._dataChunks(manifest);
             const urls = [this.config.TAG_CONFIG_URL, this.config.TAG_HIERARCHY_URL, this.config.ORGANIZERS_URL];
             for (const c of chunks) {
                 urls.push(`${this.config.DATA_DIR}events.${c}.json`);
-                urls.push(`${this.config.DATA_DIR}locations.${c}.json`);
+                urls.push(`${this.config.DATA_DIR}locations.${this._locationChunk(c)}.json`);
                 urls.push(`${this.config.DATA_DIR}events.${c}.desc.json`);
             }
-            await Promise.all(urls.map(u => fetchOne(u)));
+            await Promise.all([...new Set(urls)].map(u => fetchOne(u)));
             return { manifest: manifest || { days: [] }, chunks, files };
         },
 
@@ -906,6 +999,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const allLocationData = [];
             for (const c of fresh.chunks) {
                 allEventData.push(...(get(`${cfg.DATA_DIR}events.${c}.json`) || []));
+            }
+            for (const c of new Set(fresh.chunks.map(c => this._locationChunk(c)))) {
                 allLocationData.push(...(get(`${cfg.DATA_DIR}locations.${c}.json`) || []));
             }
 
@@ -917,12 +1012,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 tagDescendantsOf: hierarchyMaps.descendantsOf,
                 tagParentsOf: hierarchyMaps.parentsOf,
                 tagChildrenOf: hierarchyMaps.childrenOf,
-                tagEmojiMap: hierarchyMaps.tagEmojiMap
+                tagEmojiMap: hierarchyMaps.tagEmojiMap,
+                tagIconMap: hierarchyMaps.tagIconMap,
+                tagSearchTerms: hierarchyMaps.tagSearchTerms,
+                formats: hierarchyMaps.formats,
+                formatOnlyTags: hierarchyMaps.formatOnlyTags,
+                neighborhoodTags: new Set([...hierarchyMaps.neighborhoodTags, ...(tagConfig.geotags || []).filter(tag => hierarchyMaps.hierarchyTagsSet.has(tag))]),
+                tagRedirects: hierarchyMaps.tagRedirects
             };
             // Organizer emojis render like tag emojis (mirrors _loadInitialData).
             for (const [id, org] of Object.entries(organizersById)) {
                 const orgTag = Utils.makeOrganizerTag(id);
                 if (orgTag && org && org.emoji) staging.tagEmojiMap[orgTag] = org.emoji;
+                if (orgTag && org?.icon_id) staging.tagIconMap[orgTag] = org.icon_id;
             }
 
             // Empty initial pass initializes the location/event shells through
@@ -938,7 +1040,7 @@ document.addEventListener('DOMContentLoaded', () => {
             await DataManager.buildSearchIndexAsync(staging);
 
             this._swapRefreshedState(staging, fresh);
-            await this._rerenderAfterRefresh();
+            this._dataViewPending = true;
         },
 
         /** Clear+refill an object in place (identity preserved). @private */
@@ -965,15 +1067,24 @@ document.addEventListener('DOMContentLoaded', () => {
          */
         _swapRefreshedState(staging, fresh) {
             const s = this.state;
+            s.formats = staging.formats;
+            s.formatOnlyTags = staging.formatOnlyTags;
+            s.tagRedirects = staging.tagRedirects;
+            FormatSelector.configure(s.formats);
+            DiscoveryRanking.migrateTagAliases(s.tagRedirects);
 
             // In-place refills (references captured by UI modules at init)
             this._refillObject(s.tagDescendantsOf, staging.tagDescendantsOf);
             this._refillObject(s.tagParentsOf, staging.tagParentsOf);
             this._refillObject(s.tagChildrenOf, staging.tagChildrenOf);
             this._refillObject(s.tagEmojiMap, staging.tagEmojiMap);
+            this._refillObject(s.tagIconMap, staging.tagIconMap);
+            this._refillObject(s.tagSearchTerms, staging.tagSearchTerms);
             this._refillSet(s.hierarchyTagsSet, staging.hierarchyTagsSet);
             this._refillSet(s.structuralFormatTags, staging.structuralFormatTags);
             this._refillSet(s.geotagsSet, staging.geotagsSet);
+            this._refillSet(s.neighborhoodTags, staging.neighborhoodTags);
+            NeighborhoodSelector.configure(s.tagChildrenOf, s.neighborhoodTags);
 
             // Straight reassignments (read live via appState)
             s.manifest = fresh.manifest;
@@ -997,24 +1108,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Viewport aggregates were computed against the old dataset.
             this._viewportCache = null;
-        },
-
-        /**
-         * Re-render after a state swap — mirrors the Phase-2 tail exactly:
-         * date filter + location grouping + tag index rebuild, panel refresh
-         * (preserves user tag selections), then the normal filter/display
-         * pass (preserves search term, viewport, and refreshes any open
-         * popup's content in place).
-         * @private
-         */
-        async _rerenderAfterRefresh() {
-            await MapManager.loadEmojiImagesChunked(this.state.locationsByLatLng);
-            this.updateFilteredEventList({ skipDisplay: true });
-            FilterPanelUI.refreshAvailableTags({
-                allAvailableTags: this.state.allAvailableTags,
-                initialGlobalFrequencies: this.state.tagFrequencies
-            });
-            this.filterAndDisplayEvents();
         },
 
         /**
@@ -1091,7 +1184,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 onThemeChange: (theme) => {
                     // Reassign colors for selected tags with new theme palette
                     TagColorManager.reassignTagColors();
-                    FilterPanelUI.renderChipBar();
+                    FilterPanelUI.refreshTagSelector();
                 }
             });
         },
@@ -1125,10 +1218,16 @@ document.addEventListener('DOMContentLoaded', () => {
          * @param {string} term - The search term
          */
         performSearch(term) {
+            FomoQueries.invalidate();
             const FP = (typeof window !== 'undefined' && window.FilterProfiler) || null;
             const run = () => {
                 const previousTerm = this.state.searchTerm;
                 this.state.searchTerm = term;
+
+                if (this._dataViewPending) {
+                    this.filterAndDisplayEvents();
+                    return;
+                }
 
                 if (FP) FP.mark('fp:search:start');
                 // No term + debug off: renderFilters takes the ListView branch
@@ -1191,15 +1290,26 @@ document.addEventListener('DOMContentLoaded', () => {
             const run = () => {
                 if (FP) FP.mark('fp:dates:start');
 
+                const structuredEvents = FomoQueries.currentViewEvents();
+                if (structuredEvents) {
+                    this.state.allEventsFilteredByDate = structuredEvents;
+                    this.state.allEventsFilteredByDateAndLocation = structuredEvents;
+                    DataManager.groupEventsByLatLngInDateRange(this.state);
+                    if (!skipDisplay) this.filterAndDisplayEvents();
+                    return;
+                }
                 const selectedDates = this.state.datePickerInstance.selectedDates;
                 if (selectedDates.length < 1) {
+                    this.state.allEventsFilteredByDate = [];
                     this.state.allEventsFilteredByDateAndLocation = [];
                 } else {
                     // A lone start date (mid range-pick) acts as a single-day
                     // range (start, start) so filtering applies on the first click.
                     const startDate = selectedDates[0];
                     const endDate = selectedDates.length >= 2 ? selectedDates[1] : selectedDates[0];
-                    const events = FilterManager.filterEventsByDateRange(startDate, endDate);
+                    this.state.allEventsFilteredByDate = FilterManager.filterEventsByDateRange(startDate, endDate);
+                    const events = this.state.allEventsFilteredByDate.filter(FormatSelector.matches)
+                        .filter(event => NeighborhoodSelector.matches(event, this.state.locationsByLatLng[event.locationKey]));
 
                     if (FP) {
                         FP.mark('fp:dates:byRange');
@@ -1218,7 +1328,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     FP.measure('fp:dates:groupByLatLng', 'fp:dates:filtered', 'fp:dates:grouped');
                 }
 
-                DataManager.buildTagIndex(this.state, this.state.allEventsFilteredByDateAndLocation);
+                // Index the whole date range so facet counts can include alternatives
+                // outside the selected format/area. Filtering still intersects base IDs.
+                DataManager.buildTagIndex(this.state, this.state.allEventsFilteredByDate);
 
                 if (FP) {
                     FP.mark('fp:dates:tagIndex');
@@ -1264,7 +1376,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 maxZoom: this.config.MAP_MAX_ZOOM,
                 attributionControl: false,
                 dragPan: false, // Disable initially, re-enable without inertia below
-                fadeDuration: 0 // No crossfade on label collision changes
+                // Brief native symbol fades keep filtering and map movement smooth.
+                fadeDuration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 150
             });
 
             // Re-enable drag pan without inertia (momentum after releasing)
@@ -1338,10 +1451,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     ViewportManager.adjustMapToVisibleCenter(map, desiredVisibleCenter, false);
 
                     // Load emoji images and set up WebGL marker interactions.
-                    // The map can become ready before Phase-1 data has loaded
-                    // (they run in parallel), so locationsByLatLng may be absent;
-                    // updateMarkerData() lazily adds any missing emoji images later.
-                    MapManager.loadEmojiImages(this.state.locationsByLatLng || {});
+                    // Emoji images are warmed asynchronously after both the map
+                    // and Phase-1 data are ready, before the first marker render.
                     MapManager.setupMarkerInteractions();
 
                     // Give the sheet the map instance (popupopen/popupclose firing)
@@ -1397,20 +1508,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                 duration: restoring ? 0 : 300
                             });
                         });
-                    } else if (!popup) {
-                        // Desktop panel-detail (popups=panel prototype) —
-                        // center the marker in the region the panel leaves
-                        // uncovered instead of the popup measure+pan fit.
-                        requestAnimationFrame(() => {
-                            const sheetEl = document.getElementById('sheet');
-                            const sheetWidth = (sheetEl && sheetEl.offsetWidth) || 420;
-                            const { filterPanelHeight } = ViewportManager.getFilterPanelDimensions();
-                            this.state.map.easeTo({
-                                center: [lngLat.lng, lngLat.lat],
-                                offset: [sheetWidth / 2, filterPanelHeight / 2],
-                                duration: restoring ? 0 : 300
-                            });
-                        });
                     } else {
                         // Desktop popup — measure and pan to fit
                         requestAnimationFrame(() => {
@@ -1448,6 +1545,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 // ready. Skip during init — the explicit filterAndDisplayEvents()
                 // at the end of init() performs the first render.
                 if (this.state.isInitialLoad) return;
+                if (this._dataViewPending) {
+                    this.filterAndDisplayEvents();
+                    return;
+                }
                 const FP = (typeof window !== 'undefined' && window.FilterProfiler) || null;
                 const run = () => {
                     if (FP) FP.mark('fp:moveend:start');
@@ -1482,18 +1583,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     HistoryManager.push();
                 }
-            });
-        },
-
-        /**
-         * Initialize the EmojiManager module
-         * Sets up emoji font loading and switching functionality
-         * @memberof App
-         */
-        initEmojiManager() {
-            // Initialize EmojiManager
-            EmojiManager.init({
-                appState: this.state
             });
         },
 
@@ -1547,18 +1636,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 tagParentsOf: this.state.tagParentsOf,
                 tagChildrenOf: this.state.tagChildrenOf,
                 structuralFormatTags: this.state.structuralFormatTags,
+                neighborhoodTags: this.state.neighborhoodTags,
                 tagEmojiMap: this.state.tagEmojiMap,
-                getSelectedTagsWithColors: () => TagColorManager.getSelectedTagsWithColors(),
                 initialGlobalFrequencies: this.state.tagFrequencies,
                 resultsContainerDOM: this.elements.resultsContainer,
                 onFilterChangeCallback: () => {
-                    this.filterAndDisplayEvents();
+                    this._requestFilterUpdate();
                     HistoryManager.push();
                 },
                 onSearchResultClick: (result) => this.handleSearchResultClick(result),
                 performSearch: (term) => this.performSearch(term),
                 getSearchTerm: () => this._getCurrentSearchTerm(),
                 getVisibleTagFrequencies: () => this.state.visibleTagFrequencies,
+                getEventFilterTags: event => Utils.eventFilterTags(event, this.state.locationsByLatLng[event.locationKey]),
                 colorProvider: {
                     getTagColor: (tag) => TagColorManager.getTagColor(tag),
                     assignColorToTag: (tag) => TagColorManager.assignColorToTag(tag),
@@ -1592,7 +1682,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // view populates.
             if (typeof Sheet !== 'undefined') {
                 Sheet.init({
-                    onToggle: (open) => { if (open) FilterPanelUI.rerender(); }
+                    onToggle: (open) => {
+                        if (open) FilterPanelUI.rerender();
+                        setTimeout(() => MapManager.refreshPromotedMarkers(), 300);
+                    }
                 });
             }
         },
@@ -1646,7 +1739,42 @@ document.addEventListener('DOMContentLoaded', () => {
          * @memberof App
          * @param {Object} [options={}] - Optional configuration
          */
+        _requestFilterUpdate(datesChanged = false) {
+            FomoQueries.invalidate();
+            this._pendingDateUpdate = this._pendingDateUpdate || datesChanged;
+            if (this._filterUpdateQueued) return;
+            this._filterUpdateQueued = true;
+            const status = document.getElementById('filter-update-status');
+            if (status) status.hidden = false;
+            // Allow the selected control and status to paint first. Read the
+            // latest state when this runs, not a snapshot of the first click.
+            requestAnimationFrame(() => setTimeout(() => {
+                this._filterUpdateQueued = false;
+                const updateDates = this._pendingDateUpdate;
+                this._pendingDateUpdate = false;
+                try {
+                    if (updateDates) this.updateFilteredEventList();
+                    else this.filterAndDisplayEvents();
+                } finally {
+                    if (status) status.hidden = true;
+                }
+            }, 0));
+        },
+
         filterAndDisplayEvents(options = {}) {
+            if (!this._selectedDateChunksReady()) {
+                this._waitingForDateChunks = true;
+                return;
+            }
+            this._waitingForDateChunks = false;
+            if (this._dataViewPending) {
+                this._dataViewPending = false;
+                this.updateFilteredEventList({ skipDisplay: true });
+                FilterPanelUI.refreshAvailableTags({
+                    allAvailableTags: this.state.allAvailableTags,
+                    initialGlobalFrequencies: this.state.tagFrequencies
+                });
+            }
             if (!this.state.datePickerInstance) {
                 console.warn("filterAndDisplayEvents called before datePicker is initialized.");
                 return;
@@ -1668,11 +1796,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const currentTagStates = FilterPanelUI.getTagStates();
 
-            // Use FilterManager to filter events by tags
-            const allMatchingEventsFlatList = FilterManager.filterEventsByTags(
-                currentTagStates,
-                this.state.allEventsFilteredByDateAndLocation
-            );
+            // Facet counts use dates + topics + the other selector, across the
+            // whole map. Deduplication and ancestor counts live in each selector.
+            const tagMatches = FilterManager.filterEventsByTags(
+                currentTagStates, this.state.allEventsFilteredByDate || []);
+            const areaMatches = tagMatches.filter(event =>
+                NeighborhoodSelector.matches(event, this.state.locationsByLatLng[event.locationKey]));
+            const formatMatches = tagMatches.filter(FormatSelector.matches);
+            const selectorEvents = (this.state.allEventsFilteredByDate || []).filter(event =>
+                FormatSelector.matches(event) && NeighborhoodSelector.matches(event, this.state.locationsByLatLng[event.locationKey]));
+            TagSelector.updateCounts(selectorEvents, this.state.locationsByLatLng);
+            VenueSelector.updateCounts(selectorEvents, this.state.locationsByLatLng);
+            FormatSelector.updateCounts(areaMatches);
+            NeighborhoodSelector.updateCounts(formatMatches, this.state.locationsByLatLng);
+            const allMatchingEventsFlatList = FomoQueries.currentViewEvents() ?? areaMatches.filter(FormatSelector.matches);
 
             if (FP) {
                 FP.mark('fp:fade:byTags');
@@ -1825,14 +1962,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     params.tags = selectedTags;
                 }
 
-                // Prototype themes travel in share links; dark/light never do
-                const currentTheme = ThemeManager.getCurrentTheme();
-                if (Themes.resolve(currentTheme).proto) {
-                    params.theme = currentTheme;
-                }
+                params.formats = FormatSelector.selection();
+                params.neighborhoods = NeighborhoodSelector.selection();
 
                 // Generate the shareable URL using URLParams module
-                const shareUrl = URLParams.generateShareUrl(params);
+                const shareUrl = FomoQueries.shareUrl() || URLParams.generateShareUrl(params);
 
                 // Copy to clipboard
                 navigator.clipboard.writeText(shareUrl).then(() => {

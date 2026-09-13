@@ -40,6 +40,8 @@ const URLParams = (() => {
     function parse() {
         const urlParams = new URLSearchParams(window.location.search);
         const params = {};
+        // Structured links are decoded by FomoQueries; retain the URL until then.
+        if (urlParams.has("qv") || urlParams.has("q")) return params;
         const warnings = [];
 
         const lat = readNumber(urlParams, warnings, 'lat', 'Latitude', VALIDATION.LAT_MIN, VALIDATION.LAT_MAX, parseFloat);
@@ -73,16 +75,18 @@ const URLParams = (() => {
             }
         }
 
-        // Prototype params. Their side effects (persisting flags/theme) run
-        // in ProtoFlags at script-eval time, long before this parse; they're
-        // recognized here so the address-bar cleanup strips them too.
-        const proto = urlParams.get('proto');
-        if (proto === '1' || proto === '0') {
-            params.proto = proto === '1';
+        if (urlParams.has('formats')) {
+            params.formats = (urlParams.get('formats') || '').slice(0, 2000).split(',').map(t => t.trim()).filter(Boolean);
         }
-        const theme = urlParams.get('theme');
-        if (theme !== null && /^[a-z0-9-]{1,32}$/.test(theme)) {
-            params.theme = theme;
+
+        if (urlParams.has('neighborhoods')) {
+            try {
+                const raw = urlParams.get('neighborhoods');
+                if (raw.length > 30000) throw new Error('Neighborhood selection too long');
+                const values = JSON.parse(raw);
+                if (!Array.isArray(values) || !values.every(v => typeof v === 'string')) throw new Error('Invalid neighborhoods');
+                params.neighborhoods = values;
+            } catch { warnings.push('Invalid neighborhood selection, ignoring'); }
         }
 
         // Log warnings if any validation issues occurred
@@ -265,12 +269,8 @@ const URLParams = (() => {
             urlParams.set('tags', params.tags.join(','));
         }
 
-        // Prototype themes only — dark/light share URLs stay byte-identical
-        // to what they always were.
-        if (params.theme && Themes.isKnown(params.theme) && Themes.resolve(params.theme).proto) {
-            urlParams.set('theme', params.theme);
-        }
-
+        if (Array.isArray(params.formats)) urlParams.set('formats', params.formats.join(','));
+        if (Array.isArray(params.neighborhoods)) urlParams.set('neighborhoods', JSON.stringify(params.neighborhoods));
         return `${baseUrl}?${urlParams.toString()}`;
     }
 

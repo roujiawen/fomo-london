@@ -18,21 +18,32 @@ const MapManager = (() => {
         // "<locationKey>|<eventName>" while the hover layer's label is
         // overridden to show a specific event (list-row hover), else null
         hoverLabelEventSig: null,
+        hoverIconImageId: null,
 
         // Bidirectional lookups between locationKey and feature ID
         locationKeyToFeatureId: new Map(),
+        locationKeyToLabelFeatureId: new Map(),
         featureIdToLocationKey: new Map(),
 
-        // Emoji image tracking
-        emojiImagesLoaded: new Set(),
-        emojiScale: null, // computed once at first render
-        // Transform recipe the current emoji images were rasterized with
-        // (see _syncEmojiImageEpoch)
-        emojiImagesTransformKey: null,
+        // All artwork uses the same lazy, themed sprite cache.
+        iconDescriptors: new Map(),
+        loadedIcons: new Set(),
+        pendingIcons: new Set(),
+        iconFades: new Map(),
+        iconFadeFrame: null,
+        markerFades: new Map(),
+        fadedFeatureIds: new Set(),
+        promotedIconIds: new Map(),
+        accentedFeatureIds: new Set(),
+        iconEpoch: 0,
+        iconTheme: null,
 
         // Cache for restoring after style.load (theme change)
         sourceDataCache: null,
         layersAdded: false,
+        rankedPlaces: [],
+        promotedPlaces: new Set(),
+        promotedSignature: null,
 
         // Popup content callbacks by locationKey
         popupContentCallbacks: new Map()
@@ -56,6 +67,8 @@ const MapManager = (() => {
         // Ensure source/layers exist whenever the map becomes idle, too.
         // Safety net covering any path where style.load didn't (re-)create them.
         mapInstance.on('idle', _ensureLayers);
+        mapInstance.on('moveend', refreshPromotedMarkers);
+        mapInstance.on('resize', refreshPromotedMarkers);
 
         // Try immediate setup if style is already loaded
         if (mapInstance.isStyleLoaded()) {
@@ -77,7 +90,9 @@ const MapManager = (() => {
         if (map.getSource('markers')) return; // Already set up
 
         state.layersAdded = false;
-        state.emojiImagesLoaded.clear();
+        state.promotedSignature = null;
+        _cancelIconFades();
+        state.loadedIcons.clear();
         _addSourceAndLayers();
         if (state.sourceDataCache) {
             _restoreAfterStyleChange();
@@ -98,14 +113,12 @@ const MapManager = (() => {
         // Layer 1: Emoji icons + text labels.
         // Each location emits up to TWO features:
         //   1. Icon-only (lowest sortKey, placed first → populates collision grid)
-        //   2. Expanded label — 2-line: location name + event label below
-        // Labels are always 2-line. text-allow-overlap:false + text-optional:true
-        // means a label that collides is simply dropped (the icon still shows);
-        // there is no single-line fallback.
+        //   2. Event name and count of other matching events at this location.
+        // Colliding labels are dropped independently of their event icons.
         // Layout/paint shared by the two symbol layers; each passes only the
         // placement/overlap flags and colors that differ.
         const symbolLayout = (overrides) => Object.assign({
-            'icon-image': ['get', 'emojiImageId'],
+            'icon-image': _getIconImageExpression(),
             'icon-size': _getIconSize(),
             'icon-allow-overlap': true,
             'icon-offset': [-8, 0],
@@ -114,7 +127,7 @@ const MapManager = (() => {
             'text-size': _getLabelSize(),
             'text-anchor': 'left',
             'text-justify': 'left',
-            'text-offset': [1.4, -0.15],
+            'text-offset': [1.4, 0],
             'text-max-width': 50,
             'text-letter-spacing': 0,
             'text-line-height': 1.15,
@@ -128,9 +141,21 @@ const MapManager = (() => {
         });
 
         map.addLayer({
+            id: 'marker-dots', type: 'circle', source: 'markers',
+            filter: ['==', ['get', 'labelType'], 'icon'],
+            paint: {
+                'circle-radius': 3,
+                'circle-color': window.__CITY__?.map?.dot_color || '#808080',
+                'circle-opacity': 0.55,
+                'circle-stroke-width': 0
+            }
+        });
+
+        map.addLayer({
             id: 'marker-symbols',
             type: 'symbol',
             source: 'markers',
+            filter: ['==', ['get', 'locationKey'], ''],
             layout: symbolLayout({
                 'icon-ignore-placement': false,
                 'icon-padding': 0,
@@ -139,7 +164,18 @@ const MapManager = (() => {
                 'text-ignore-placement': false,
                 'text-padding': 3
             }),
-            paint: symbolPaint(_getLabelColor(), 2)
+            // Keep highlighted symbols in collision placement, but let the
+            // overlay draw them. Removing them frees room for unrelated labels.
+            paint: {
+                ...symbolPaint(_getLabelColor(), 2),
+                'icon-opacity': ['case', ['any',
+                    ['boolean', ['feature-state', 'hover'], false],
+                    ['boolean', ['feature-state', 'active'], false]], 0,
+                    ['coalesce', ['feature-state', 'iconOpacity'], 1]],
+                'text-opacity': ['case', ['any',
+                    ['boolean', ['feature-state', 'hover'], false],
+                    ['boolean', ['feature-state', 'active'], false]], 0, 1]
+            }
         });
 
         // Layer 2: Highlight circle (colored ring on hover/active, above all emojis)
@@ -147,6 +183,7 @@ const MapManager = (() => {
             id: 'marker-highlight',
             type: 'circle',
             source: 'markers',
+            filter: ['==', ['get', 'labelType'], 'icon'],
             paint: {
                 'circle-radius': _getMarkerRadius(),
                 'circle-color': 'transparent',
@@ -156,7 +193,7 @@ const MapManager = (() => {
                     ['boolean', ['feature-state', 'hover'], false], 4,
                     0
                 ],
-                'circle-stroke-color': ['get', 'color']
+                'circle-stroke-color': ['coalesce', ['feature-state', 'accent'], ['get', 'color']]
             }
         });
 
@@ -178,6 +215,88 @@ const MapManager = (() => {
         // per-event label override).
         state.hoverLabelEventSig = null;
         state.layersAdded = true;
+
+        // Only promoted emoji have hit targets. Dots are passive density hints;
+        // hovering or clicking one must never promote it or open its content.
+        map.addLayer({
+            id: 'marker-hit-targets', type: 'circle', source: 'markers',
+            filter: ['==', ['get', 'locationKey'], ''],
+            paint: { 'circle-radius': Utils.isMobileLayout() ? 12 : 9, 'circle-opacity': 0 }
+        });
+        _syncDotTheme();
+    }
+
+    function _syncDotTheme() {
+        const map = state.mapInstance;
+        if (!map?.getLayer('marker-dots')) return;
+        const dark = Utils.getCurrentTheme() === 'dark';
+        if (dark && !map.getLayer('marker-dot-density')) {
+            map.addLayer(DotDensityLayer.create(() => ({ places: state.rankedPlaces, promoted: state.promotedPlaces }),
+                window.__CITY__?.map?.dot_color || '#808080'), 'marker-symbols');
+        } else if (!dark && map.getLayer('marker-dot-density')) map.removeLayer('marker-dot-density');
+        map.setPaintProperty('marker-dots', 'circle-opacity', dark ? 0 : .55);
+    }
+
+    function refreshPromotedMarkers() {
+        const map = state.mapInstance;
+        if (!map?.getLayer('marker-symbols')) return;
+        const canvas = map.getCanvas();
+        const rect = canvas.getBoundingClientRect();
+        // The canvas extends beyond the window for map tilt/overscan. Budget
+        // actual visible pixels, not that larger backing canvas.
+        const viewport = document.getElementById('map-container').getBoundingClientRect();
+        const left = Math.max(0, viewport.left, rect.left), top = Math.max(0, viewport.top, rect.top);
+        const right = Math.min(innerWidth, viewport.right, rect.right), bottom = Math.min(innerHeight, viewport.bottom, rect.bottom);
+        const cover = ['filter-panel', 'sheet'].map(id => document.getElementById(id))
+            .filter(el => el && !el.classList.contains('initially-hidden'))
+            .map(el => el.getBoundingClientRect());
+        const bounds = map.getBounds();
+        const candidates = state.rankedPlaces.filter(c => {
+            if (!bounds.contains(c.coordinates)) return false;
+            const p = map.project(c.coordinates);
+            const x = p.x + rect.left, y = p.y + rect.top;
+            c.distance = Math.hypot(x - (left + right) / 2, y - (top + bottom) / 2);
+            if (x < left + 12 || y < top + 12 || x > right - 12 || y > bottom - 12) return false;
+            return !cover.some(r => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
+        });
+        const hovered = state.featureIdToLocationKey.get(state.hoveredFeatureId);
+        const active = state.featureIdToLocationKey.get(state.activeFeatureId);
+        const pinned = [active, hovered].filter(Boolean);
+        const limit = Utils.isMobileLayout() ? 10 : 20;
+        const chosen = DiscoveryRanking.topPlaces(candidates, limit, pinned);
+        state.promotedPlaces = chosen;
+        const previousIcons = state.promotedIconIds;
+        state.promotedIconIds = new Map();
+        for (const key of chosen) {
+            const fid = state.locationKeyToFeatureId.get(key);
+            const icon = state.sourceDataCache?.features[fid];
+            if (icon) {
+                const imageId = icon.properties.iconImageId;
+                state.promotedIconIds.set(key, imageId);
+                // MapLibre can skip placement fades on reloaded icon buckets.
+                // Cached artwork therefore needs a per-marker fade as well.
+                if (state.loadedIcons.has(imageId) && previousIcons.get(key) !== imageId &&
+                    !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+                    state.markerFades.set(key, { imageId, start: performance.now() });
+                    state.fadedFeatureIds.add(fid);
+                    _setMarkerFeatureState(fid, { iconOpacity: 0 });
+                    if (state.iconFadeFrame === null) state.iconFadeFrame = requestAnimationFrame(_animateIconFades);
+                }
+                _addIconImage(imageId);
+            }
+        }
+        // Pinning can change Set order without changing membership. Keep the
+        // filter stable so hovering an existing icon never re-lays out symbols.
+        const promotedKeys = [...chosen].sort();
+        const signature = JSON.stringify(promotedKeys);
+        if (signature !== state.promotedSignature) {
+            state.promotedSignature = signature;
+            map.setFilter('marker-symbols', ['in', ['get', 'locationKey'], ['literal', promotedKeys]]);
+            map.setFilter('marker-hit-targets', ['all', ['==', ['get', 'labelType'], 'icon'],
+                ['in', ['get', 'locationKey'], ['literal', [...chosen]]]]);
+            map.setFilter('marker-dots', ['all', ['==', ['get', 'labelType'], 'icon'],
+                ['!', ['in', ['get', 'locationKey'], ['literal', [...chosen]]]]]);
+        }
     }
 
     function _getMarkerRadius() {
@@ -193,52 +312,31 @@ const MapManager = (() => {
     }
 
     function _getLabelColor() {
-        const def = Themes.resolve(Utils.getCurrentTheme());
-        if (def.marker && def.marker.label) return def.marker.label;
-        return Utils.getCurrentThemeBase() === 'dark' ? '#e5e5e5' : '#1a1a1a';
+        return Utils.getCurrentTheme() === 'dark' ? '#e5e5e5' : '#1a1a1a';
     }
 
     function _getHoverLabelColor() {
-        const def = Themes.resolve(Utils.getCurrentTheme());
-        if (def.marker && def.marker.hoverLabel) return def.marker.hoverLabel;
-        return Utils.getCurrentThemeBase() === 'dark' ? '#fff' : '#000';
+        return Utils.getCurrentTheme() === 'dark' ? '#fff' : '#000';
     }
 
     function _getHaloColor() {
-        const def = Themes.resolve(Utils.getCurrentTheme());
-        if (def.marker && def.marker.halo) return def.marker.halo;
-        return Utils.getCurrentThemeBase() === 'dark' ? '#171717' : '#f0f0f0';
+        return Utils.getCurrentTheme() === 'dark' ? '#171717' : '#f0f0f0';
     }
 
-    /** Marker-label fontstack — themes may swap in their own (e.g. a pixel font). */
+    /** Marker-label fontstack. */
     function _getMarkerTextFont() {
-        const def = Themes.resolve(Utils.getCurrentTheme());
-        return def.mapLabelFont || ['Inter Regular'];
+        return ['Inter Regular'];
     }
 
     /**
      * Builds the text-field expression used by both the main and hover layers.
-     * Renders the 2-line label (location + event) for expanded features; icon
-     * features carry no text. The event line uses a desaturated version of the
-     * marker color (pre-computed in feature properties) so the hue stays tied to
-     * the highlight ring while brightness is consistent across labels.
+     * Renders the event name for expanded features; icon features carry no
+     * text. Names inherit the layer's primary label color, font, and size.
      */
     function _getTextFieldExpression() {
         return ['case',
             ['==', ['get', 'labelType'], 'expanded'],
-                ['format',
-                    ['get', 'locationName'], {},
-                    '\n', {},
-                    ['get', 'eventLabel'], {
-                        'text-font': ['literal', _getMarkerTextFont()],
-                        'text-color': ['get', 'eventLabelColor'],
-                        'font-scale': 0.88
-                    },
-                    ['get', 'eventLabelExtra'], {
-                        'text-font': ['literal', _getMarkerTextFont()],
-                        'font-scale': 0.88
-                    }
-                ],
+                ['concat', ['get', 'eventLabel'], ['get', 'eventLabelExtra']],
             ''
         ];
     }
@@ -261,9 +359,7 @@ const MapManager = (() => {
         const cacheKey = `${theme}|${hexColor}|${opts.lightness ?? ''}|${opts.chroma ?? ''}`;
         const cached = _labelColorCache.get(cacheKey);
         if (cached !== undefined) return cached;
-        const def = Themes.resolve(theme);
-        const themeL = (def.marker && def.marker.eventLabelL)
-            ?? (Utils.getCurrentThemeBase() === 'dark' ? 74 : 50);
+        const themeL = Utils.getCurrentTheme() === 'dark' ? 74 : 50;
         const hue = ColorUtils.oklchHueFromHex(hexColor || '#888');
         const targetL = (opts.lightness ?? themeL) / 100;
         const targetC = hue === null ? 0 : (opts.chroma ?? 0.06);
@@ -274,7 +370,7 @@ const MapManager = (() => {
     }
 
     /**
-     * Builds the second-line event label parts.
+     * Builds the event label parts.
      * Returns the first event's name (truncated with ellipsis) and a separate
      * " +N" suffix string when there are additional matching events at the
      * location. Split into two parts so the format expression can color them
@@ -285,7 +381,9 @@ const MapManager = (() => {
         const first = events[0];
         // Strip country-flag emoji on every platform: the SDF label font has no
         // glyph for regional-indicator pairs, so they render as tofu in labels.
-        const rawName = Utils.stripCountryFlagEmoji((first && (first.short_name || first.name)) || '');
+        // Compose accents before SDF glyph layout and truncation: decomposed
+        // names such as "Simo\u0301n" otherwise give the accent its own advance.
+        const rawName = Utils.stripCountryFlagEmoji((first && (first.short_name || first.name)) || '').normalize('NFC');
         if (!rawName) return { name: '', extra: '' };
 
         // Only truncate when it actually saves space — slicing 23 chars down
@@ -302,211 +400,193 @@ const MapManager = (() => {
     }
 
     // ========================================
-    // EMOJI IMAGE RENDERING
+    // SHARED ARTWORK SPRITES
     // ========================================
 
-    /**
-     * Measure the actual rendered size of a reference emoji and return a
-     * scale factor that normalizes it to a target ratio (Apple-sized).
-     * Called once per font configuration; result is cached in state.emojiScale.
-     */
-    function _measureEmojiScale(fontFamily) {
-        const TARGET_RATIO = 1.0; // Apple ⬛ fills 1.0 of em-square; normalize others to match
-        const testSize = 128;
-        const canvas = document.createElement('canvas');
-        const dim = testSize * 2;
-        canvas.width = dim;
-        canvas.height = dim;
-        const ctx = canvas.getContext('2d');
-        ctx.font = `${testSize}px ${fontFamily}`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('\u2B1B', dim / 2, dim / 2); // ⬛ — solid square, fills design space
-
-        const imageData = ctx.getImageData(0, 0, dim, dim);
-        const data = imageData.data;
-        let minX = dim, maxX = 0, minY = dim, maxY = 0;
-        let found = false;
-        for (let y = 0; y < dim; y++) {
-            for (let x = 0; x < dim; x++) {
-                if (data[(y * dim + x) * 4 + 3] > 10) {
-                    found = true;
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
-                }
-            }
-        }
-        if (!found) return 1;
-
-        const measuredRatio = Math.max(maxX - minX + 1, maxY - minY + 1) / testSize;
-        const scale = TARGET_RATIO / measuredRatio;
-        console.log(
-            `[MapManager] Emoji scale: font="${fontFamily}" measured=${measuredRatio.toFixed(3)} target=${TARGET_RATIO} scale=${scale.toFixed(3)}`
-        );
-        return scale;
+    function _getIconImageExpression() {
+        return ['coalesce', ['get', 'iconImageId'], ''];
     }
 
-    function _addEmojiImage(emoji) {
+    function _eventIcon(event) {
+        const descriptor = IconManager.resolve(event);
+        const iconImageId = `icon-${descriptor.id}-${descriptor.revision}`;
+        state.iconDescriptors.set(iconImageId, descriptor);
+        return { iconImageId, color: IconManager.getColor(event) };
+    }
+
+    function _addIconImage(imageId) {
         const map = state.mapInstance;
-        const imageId = `emoji-${emoji}`;
-        if (state.emojiImagesLoaded.has(imageId) || map.hasImage(imageId)) {
-            state.emojiImagesLoaded.add(imageId);
+        const descriptor = state.iconDescriptors.get(imageId);
+        if (!descriptor || state.loadedIcons.has(imageId) || state.pendingIcons.has(imageId)) return;
+        const epoch = state.iconEpoch;
+        const theme = Utils.getCurrentTheme();
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        const size = 64 * pixelRatio;
+        // A fixed transparent slot prevents missing-image warnings during decode.
+        if (!map.hasImage(imageId)) map.addImage(imageId,
+            { width: size, height: size, data: new Uint8Array(size * size * 4) }, { pixelRatio });
+        state.pendingIcons.add(imageId);
+        IconManager.prepare(descriptor, theme, true).then(result => {
+            if (state.iconEpoch !== epoch || !map.hasImage(imageId)) return;
+            _fadeInIconImage(imageId, result.pixels);
+            state.pendingIcons.delete(imageId);
+            state.loadedIcons.add(imageId);
+            if (state.loadedIcons.size > 128) {
+                const keep = new Set([state.hoverIconImageId]);
+                for (const key of state.promotedPlaces) {
+                    const fid = state.locationKeyToFeatureId.get(key);
+                    keep.add(state.sourceDataCache?.features[fid]?.properties.iconImageId);
+                }
+                for (const oldId of state.loadedIcons) {
+                    if (state.loadedIcons.size <= 128) break;
+                    if (keep.has(oldId)) continue;
+                    if (map.hasImage(oldId)) map.removeImage(oldId);
+                    state.loadedIcons.delete(oldId);
+                }
+            }
+            if (state.sourceDataCache) {
+                const keys = new Set(state.sourceDataCache.features
+                    .filter(f => f.properties.iconImageId === imageId).map(f => f.properties.locationKey));
+                state.sourceDataCache.features.forEach(f => {
+                    if (keys.has(f.properties.locationKey)) f.properties.color = result.accent;
+                });
+                // Artwork and its accent are paint-only updates. Replacing the
+                // GeoJSON here restarts collision placement for every label.
+                for (const key of keys) {
+                    const id = state.locationKeyToFeatureId.get(key);
+                    if (id !== undefined) {
+                        _setMarkerFeatureState(id, { accent: result.accent });
+                        state.accentedFeatureIds.add(id);
+                    }
+                }
+            }
+        }).catch(() => {
+            if (state.iconEpoch === epoch) state.pendingIcons.delete(imageId);
+        });
+    }
+
+    // Symbol placement can finish fading while its sprite is still a transparent
+    // loading slot. Fade the decoded pixels separately, without re-placing labels.
+    function _fadeInIconImage(imageId, pixels) {
+        if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+            state.mapInstance.updateImage(imageId, pixels);
             return;
         }
-
-        const size = 64;
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        const canvasSize = size * dpr;
-
-        const canvas = document.createElement('canvas');
-        canvas.width = canvasSize;
-        canvas.height = canvasSize;
-        const ctx = canvas.getContext('2d');
-
-        // Resolve via TagColorManager.getActiveEmojiFont — the single source of
-        // truth — so the glyph renders with the same font the marker color was
-        // extracted under.
-        const fontFamily = TagColorManager.getActiveEmojiFont();
-
-        // Compute scale factor once per font configuration
-        if (state.emojiScale === null) {
-            state.emojiScale = _measureEmojiScale(fontFamily);
-        }
-
-        ctx.font = `${canvasSize * 0.72 * state.emojiScale}px ${fontFamily}`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        // Draw emoji shifted right on canvas so that when icon-offset shifts
-        // the image back left, the emoji stays centered but the collision box
-        // is biased leftward — preventing labels from colliding with their
-        // own location's icon in the dual-feature layout.
-        const collisionShift = 8 * dpr;
-        ctx.fillText(emoji, canvasSize / 2 + collisionShift, canvasSize / 2);
-
-        let imageData = ctx.getImageData(0, 0, canvasSize, canvasSize);
-        // Theme emoji treatment (sepia/duotone/pixelate/sticker). The same
-        // spec is applied in TagColorManager.extractColorFromEmoji, so
-        // ring/label colors track the transformed glyph.
-        const transform = Themes.resolve(Utils.getCurrentTheme()).emojiTransform;
-        if (transform) imageData = EmojiTransforms.apply(imageData, transform, dpr);
-
-        map.addImage(imageId, imageData, { pixelRatio: dpr });
-        state.emojiImagesLoaded.add(imageId);
+        state.iconFades.set(imageId, {
+            pixels,
+            frame: { width: pixels.width, height: pixels.height, data: new Uint8Array(pixels.data) },
+            start: performance.now()
+        });
+        if (state.iconFadeFrame === null) state.iconFadeFrame = requestAnimationFrame(_animateIconFades);
     }
 
-    /**
-     * Emoji images are rasterized under a theme's transform recipe, and they
-     * can SURVIVE diff-mode setStyle() (MapLibre diffs to the target style
-     * and images aren't style JSON) — so after a theme switch, hasImage()
-     * would happily keep serving stale glyphs. Track the recipe they were
-     * built with and drop them all when it changes.
-     */
-    function _syncEmojiImageEpoch() {
+    function _animateIconFades(now) {
+        state.iconFadeFrame = null;
+        const map = state.mapInstance;
+        for (const [imageId, fade] of state.iconFades) {
+            if (!map?.hasImage(imageId)) {
+                state.iconFades.delete(imageId);
+                continue;
+            }
+            const opacity = Math.min(1, Math.max(0, (now - fade.start) / 150));
+            if (opacity === 1) {
+                map.updateImage(imageId, fade.pixels);
+                state.iconFades.delete(imageId);
+            } else {
+                for (let i = 3; i < fade.frame.data.length; i += 4) {
+                    fade.frame.data[i] = Math.round(fade.pixels.data[i] * opacity);
+                }
+                map.updateImage(imageId, fade.frame);
+            }
+        }
+        for (const [key, fade] of state.markerFades) {
+            const id = state.locationKeyToFeatureId.get(key);
+            if (id === undefined || state.promotedIconIds.get(key) !== fade.imageId) {
+                if (id !== undefined) _setMarkerFeatureState(id, { iconOpacity: 1 });
+                state.markerFades.delete(key);
+                continue;
+            }
+            const opacity = Math.min(1, Math.max(0, (now - fade.start) / 150));
+            _setMarkerFeatureState(id, { iconOpacity: opacity });
+            if (opacity === 1) state.markerFades.delete(key);
+        }
+        if (state.iconFades.size || state.markerFades.size) state.iconFadeFrame = requestAnimationFrame(_animateIconFades);
+    }
+
+    function _cancelIconFades() {
+        if (state.iconFadeFrame !== null) cancelAnimationFrame(state.iconFadeFrame);
+        state.iconFadeFrame = null;
+        state.iconFades.clear();
+        _resetMarkerFades();
+    }
+
+    function _resetMarkerFades() {
+        state.markerFades.clear();
+        for (const id of state.fadedFeatureIds) _setMarkerFeatureState(id, { iconOpacity: null });
+        state.fadedFeatureIds.clear();
+    }
+
+    function _syncIconEpoch() {
+        const key = Utils.getCurrentTheme();
+        if (key === state.iconTheme) return;
+        state.iconTheme = key;
+        reloadIconImages();
+    }
+
+    function reloadIconImages() {
         const map = state.mapInstance;
         if (!map) return;
-        const tKey = Themes.transformKey(Utils.getCurrentTheme());
-        if (state.emojiImagesTransformKey === tKey) return;
-        state.emojiImagesTransformKey = tKey;
-        map.listImages()
-            .filter(id => id.startsWith('emoji-'))
-            .forEach(id => map.removeImage(id));
-        state.emojiImagesLoaded.clear();
-        state.emojiScale = null;
-    }
-
-    function _uniqueEmojis(locationsByLatLng) {
-        const uniqueEmojis = new Set();
-        for (const key in locationsByLatLng) {
-            const loc = locationsByLatLng[key];
-            if (loc && loc.emoji) uniqueEmojis.add(loc.emoji);
-        }
-        return uniqueEmojis;
-    }
-
-    function loadEmojiImages(locationsByLatLng) {
-        if (!state.mapInstance) return;
-        _syncEmojiImageEpoch();
-        _uniqueEmojis(locationsByLatLng).forEach(emoji => _addEmojiImage(emoji));
-    }
-
-    /**
-     * Async chunked version. Each canvas creation+draw is ~0.5-1ms; with 200+
-     * unique emojis that adds up to ~100ms of main-thread time on a fresh
-     * Phase 2 merge. This yields every CHUNK emojis so the user can interact.
-     */
-    async function loadEmojiImagesChunked(locationsByLatLng) {
-        if (!state.mapInstance) return;
-        _syncEmojiImageEpoch();
-        const list = [..._uniqueEmojis(locationsByLatLng)];
-        const CHUNK = 50;
-        for (let i = 0; i < list.length; i += CHUNK) {
-            const end = Math.min(i + CHUNK, list.length);
-            for (let j = i; j < end; j++) _addEmojiImage(list[j]);
-            if (end < list.length) {
-                if (typeof scheduler !== 'undefined' && typeof scheduler.yield === 'function') {
-                    await scheduler.yield();
-                } else {
-                    await new Promise(r => setTimeout(r, 0));
-                }
-            }
-        }
-    }
-
-    function reloadEmojiImages(locationsByLatLng) {
-        if (!state.mapInstance) return;
-        // Reset scale so it's re-measured with the (possibly changed) font
-        state.emojiScale = null;
-        // Remove all existing emoji images and reload
-        state.emojiImagesLoaded.forEach(imageId => {
-            if (state.mapInstance.hasImage(imageId)) {
-                state.mapInstance.removeImage(imageId);
-            }
-        });
-        state.emojiImagesLoaded.clear();
-        loadEmojiImages(locationsByLatLng);
-
-        // Trigger a source data refresh to pick up new images
-        if (state.sourceDataCache) {
-            // Marker colors are derived from the emoji font (see getMarkerColor), so
-            // a font switch changes them too. The cached features carry baked color
-            // properties — re-derive them under the now-active font so highlight rings
-            // and secondary labels stay consistent with the glyphs.
-            state.sourceDataCache.features.forEach(f => {
-                const li = locationsByLatLng[f.properties.locationKey];
-                if (!li) return;
-                const color = getMarkerColor(li);
-                f.properties.color = color;
-                if (f.properties.labelType === 'expanded') {
-                    f.properties.eventLabelColor = _toEventLabelColor(color);
-                }
-            });
-            const source = state.mapInstance.getSource('markers');
-            if (source) {
-                source.setData(state.sourceDataCache);
-            }
-        }
+        state.iconEpoch++;
+        _cancelIconFades();
+        for (const id of state.accentedFeatureIds) _setMarkerFeatureState(id, { accent: null });
+        state.accentedFeatureIds.clear();
+        state.pendingIcons.clear();
+        state.loadedIcons.clear();
+        state.iconTheme = Utils.getCurrentTheme();
+        _clearHoverLabelEvent();
+        map.listImages().filter(id => id.startsWith('icon-')).forEach(id => map.removeImage(id));
+        refreshPromotedMarkers();
     }
 
     // ========================================
     // MARKER DATA MANAGEMENT
     // ========================================
 
-    function updateMarkerData(filteredLocations, locationsByLatLng, popupContentCallbacks) {
+    function updateMarkerData(filteredLocations, locationsByLatLng, popupContentCallbacks, matchingLocations = filteredLocations) {
         const map = state.mapInstance;
         if (!map) return;
+        _resetMarkerFades();
+        _syncIconEpoch();
+
+        // Clear stale feature-state before replacing data — MapLibre preserves
+        // feature-state across setData(), so old hover/active states would
+        // "stick" to whatever feature inherits the same auto-generated ID.
+        // The hover-label override references the old data too.
+        _clearHoverLabelEvent();
+        if (state.hoveredFeatureId !== null) {
+            _setMarkerFeatureState(state.hoveredFeatureId, { hover: false });
+            state.hoveredFeatureId = null;
+        }
+        if (state.activeFeatureId !== null) {
+            _setMarkerFeatureState(state.activeFeatureId, { active: false });
+            state.activeFeatureId = null;
+        }
+        // Generated IDs can now belong to different icons, including their
+        // asynchronously resolved paint colors.
+        for (const id of state.accentedFeatureIds) _setMarkerFeatureState(id, { accent: null });
+        state.accentedFeatureIds.clear();
 
         // Store callbacks
         state.popupContentCallbacks = popupContentCallbacks;
 
         // Build GeoJSON features — up to two per location:
         //   1. Icon (lowest sortKey → placed first, populates collision grid)
-        //   2. Expanded label — 2-line: location + event title
-        // Labels are always 2-line; a label that collides is simply dropped.
+        //   2. Event label; a label that collides is simply dropped.
         const iconFeatures = [];
         const expandedLabelFeatures = [];
+        state.rankedPlaces = [];
         state.locationKeyToFeatureId.clear();
+        state.locationKeyToLabelFeatureId.clear();
         state.featureIdToLocationKey.clear();
 
         for (const locationKey in filteredLocations) {
@@ -521,32 +601,28 @@ const MapManager = (() => {
             const locationInfo = locationsByLatLng[locationKey];
             if (!locationInfo) continue;
 
-            // Ensure emoji image exists
-            if (locationInfo.emoji) {
-                _addEmojiImage(locationInfo.emoji);
-            }
-
-            const color = getMarkerColor(locationInfo);
-            const shortName = locationInfo.short_name || locationInfo.name || '';
-            const { name: eventLabel, extra: eventLabelExtra } = _buildEventLabel(events);
+            const ranked = [...(matchingLocations[locationKey] || events)].sort((a, b) =>
+                DiscoveryRanking.score(b, locationInfo) - DiscoveryRanking.score(a, locationInfo) || Number(a.id) - Number(b.id));
+            const { iconImageId, color } = _eventIcon(ranked[0]);
+            const { name: eventLabel, extra: eventLabelExtra } = _buildEventLabel(ranked);
+            state.rankedPlaces.push({ key: locationKey, coordinates: [lng, lat],
+                score: ranked.length ? DiscoveryRanking.score(ranked[0], locationInfo) : 0 });
 
             // Icon feature — no text (the default text-field expression skips
-            // icons), placed first via low sortKey. shortName is carried for the
-            // hover layer's list-hover override, which labels the icon feature.
+            // icons), placed first via low sortKey.
             iconFeatures.push({
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [lng, lat] },
                 properties: {
                     locationKey,
                     labelType: 'icon',
-                    shortName,
-                    emojiImageId: `emoji-${locationInfo.emoji || '📍'}`,
+                    iconImageId,
                     color,
                     sortKey: -10000 - lat
                 }
             });
 
-            // Expanded label — 2-line; only emit when an event label exists
+            // Only emit a label when an event name exists.
             if (eventLabel) {
                 expandedLabelFeatures.push({
                     type: 'Feature',
@@ -554,11 +630,8 @@ const MapManager = (() => {
                     properties: {
                         locationKey,
                         labelType: 'expanded',
-                        locationName: shortName,
                         eventLabel,
                         eventLabelExtra,
-                        eventLabelColor: _toEventLabelColor(color),
-                        shortName,
                         color,
                         sortKey: -5000 - lat
                     }
@@ -581,24 +654,11 @@ const MapManager = (() => {
             const id = features.length;
             features.push(f);
             state.featureIdToLocationKey.set(id, f.properties.locationKey);
+            state.locationKeyToLabelFeatureId.set(f.properties.locationKey, id);
         });
 
         const geojson = { type: 'FeatureCollection', features };
         state.sourceDataCache = geojson;
-
-        // Clear stale feature-state before replacing data — MapLibre preserves
-        // feature-state across setData(), so old hover/active states would
-        // "stick" to whatever feature inherits the same auto-generated ID.
-        // The hover-label override references the old data too.
-        _clearHoverLabelEvent();
-        if (state.hoveredFeatureId !== null) {
-            map.setFeatureState({ source: 'markers', id: state.hoveredFeatureId }, { hover: false });
-            state.hoveredFeatureId = null;
-        }
-        if (state.activeFeatureId !== null) {
-            map.setFeatureState({ source: 'markers', id: state.activeFeatureId }, { active: false });
-            state.activeFeatureId = null;
-        }
 
         const source = map.getSource('markers');
         if (source) {
@@ -610,7 +670,7 @@ const MapManager = (() => {
             const fid = state.locationKeyToFeatureId.get(state.currentPopupLocationKey);
             if (fid !== undefined) {
                 state.activeFeatureId = fid;
-                map.setFeatureState({ source: 'markers', id: fid }, { active: true });
+                _setMarkerFeatureState(fid, { active: true });
             }
         }
         _updateHoverFilter();
@@ -620,17 +680,8 @@ const MapManager = (() => {
         const map = state.mapInstance;
         if (!map || !state.sourceDataCache) return;
 
-        // Reload emoji images (dropping stale-transform ones first)
-        _syncEmojiImageEpoch();
-        const uniqueEmojis = new Set();
-        state.sourceDataCache.features.forEach(f => {
-            const eid = f.properties.emojiImageId;
-            if (eid) {
-                const emoji = eid.replace('emoji-', '');
-                uniqueEmojis.add(emoji);
-            }
-        });
-        uniqueEmojis.forEach(emoji => _addEmojiImage(emoji));
+        // Style reloads can destroy images even when the theme is unchanged.
+        reloadIconImages();
 
         // Restore data
         const source = map.getSource('markers');
@@ -640,12 +691,15 @@ const MapManager = (() => {
 
         // Rebuild lookup maps — icons are emitted first; labelType disambiguates
         state.locationKeyToFeatureId.clear();
+        state.locationKeyToLabelFeatureId.clear();
         state.featureIdToLocationKey.clear();
         state.sourceDataCache.features.forEach((f, i) => {
             const locKey = f.properties.locationKey;
             state.featureIdToLocationKey.set(i, locKey);
             if (f.properties.labelType === 'icon') {
                 state.locationKeyToFeatureId.set(locKey, i);
+            } else {
+                state.locationKeyToLabelFeatureId.set(locKey, i);
             }
         });
 
@@ -654,7 +708,7 @@ const MapManager = (() => {
             const fid = state.locationKeyToFeatureId.get(state.currentPopupLocationKey);
             if (fid !== undefined) {
                 state.activeFeatureId = fid;
-                map.setFeatureState({ source: 'markers', id: fid }, { active: true });
+                _setMarkerFeatureState(fid, { active: true });
             }
         }
         _updateHoverFilter();
@@ -672,9 +726,8 @@ const MapManager = (() => {
      * location's label, even when the main layer dropped it on collision.
      * Called whenever hover or active state changes.
      *
-     * Labels are always 2-line (the single 'expanded' variant), so there is
-     * nothing to match against the main layer's collision result — we simply
-     * show every feature (icon + expanded) for the hovered/active keys. This
+     * Show every feature (icon + event label) for the hovered/active keys,
+     * regardless of the main layer's collision result. This
      * keeps the per-hover work to a single setFilter() with no
      * queryRenderedFeatures() scan.
      */
@@ -702,15 +755,16 @@ const MapManager = (() => {
         }
 
         map.setFilter('marker-symbols-hover', keyFilter);
+        refreshPromotedMarkers();
     }
 
     /**
-     * Overrides the hover layer's label for `locationKey` so its second line
-     * shows `labelEvent`'s name — the desktop list view hovers individual
+     * Overrides the hover layer's icon and label for `locationKey` to show
+     * `labelEvent` — the desktop list view hovers individual
      * events, which may not be the event the location's default label picked.
      * The override renders on the location's icon feature (which exists even
-     * when the main layer emitted no expanded label, and carries shortName for
-     * line 1) and blanks that location's expanded feature so the label isn't
+     * when the main layer emitted no expanded label) and blanks that
+     * location's expanded feature so the label isn't
      * doubled. Any other location in the hover layer (the active popup's)
      * keeps the default label.
      */
@@ -726,34 +780,36 @@ const MapManager = (() => {
             _clearHoverLabelEvent();
             return;
         }
-        const sig = `${locationKey}|${name}`;
+        const { iconImageId } = _eventIcon(labelEvent);
+        state.hoverIconImageId = iconImageId;
+        _addIconImage(iconImageId);
+        const sig = `${locationKey}|${name}|${iconImageId}`;
         if (sig === state.hoverLabelEventSig) return;
         state.hoverLabelEventSig = sig;
+        map.setLayoutProperty('marker-symbols-hover', 'icon-image', ['case',
+            ['all', ['==', ['get', 'locationKey'], locationKey], ['==', ['get', 'labelType'], 'icon']],
+            iconImageId,
+            _getIconImageExpression()
+        ]);
         map.setLayoutProperty('marker-symbols-hover', 'text-field', ['case',
             ['==', ['get', 'locationKey'], locationKey],
                 ['case',
                     ['==', ['get', 'labelType'], 'icon'],
-                        ['format',
-                            ['get', 'shortName'], {},
-                            '\n', {},
-                            name, {
-                                'text-font': ['literal', _getMarkerTextFont()],
-                                'text-color': _toEventLabelColor(icon.properties.color),
-                                'font-scale': 0.88
-                            }
-                        ],
+                        name,
                     ''
                 ],
             _getTextFieldExpression()
         ]);
     }
 
-    /** Restore the hover layer's default label (location + its top event). */
+    /** Restore the hover layer's default event icon and label. */
     function _clearHoverLabelEvent() {
         const map = state.mapInstance;
         if (!map || state.hoverLabelEventSig === null || !map.getLayer('marker-symbols-hover')) return;
         state.hoverLabelEventSig = null;
+        state.hoverIconImageId = null;
         map.setLayoutProperty('marker-symbols-hover', 'text-field', _getTextFieldExpression());
+        map.setLayoutProperty('marker-symbols-hover', 'icon-image', _getIconImageExpression());
     }
 
     /**
@@ -762,15 +818,29 @@ const MapManager = (() => {
      * i.e. an unresolvable locationKey): clears the previous feature's hover
      * state, sets the new one, then refreshes the hover-label filter.
      */
+    // Search/popup interactions can precede the initial source or a style reload.
+    // Keep logical active state in the caller; the restore path reapplies it later.
+    function _setMarkerFeatureState(id, value) {
+        const map = state.mapInstance;
+        if (map && map.getSource('markers')) {
+            map.setFeatureState({ source: 'markers', id }, value);
+            const key = state.featureIdToLocationKey.get(id);
+            const labelId = state.locationKeyToLabelFeatureId.get(key);
+            if (labelId !== undefined && labelId !== id) {
+                map.setFeatureState({ source: 'markers', id: labelId }, value);
+            }
+        }
+    }
+
     function _setHoveredIcon(iconFid) {
         const map = state.mapInstance;
         if (!map || iconFid === undefined || iconFid === state.hoveredFeatureId) return;
         if (state.hoveredFeatureId !== null) {
-            map.setFeatureState({ source: 'markers', id: state.hoveredFeatureId }, { hover: false });
+            _setMarkerFeatureState(state.hoveredFeatureId, { hover: false });
         }
         state.hoveredFeatureId = iconFid;
         if (iconFid !== null) {
-            map.setFeatureState({ source: 'markers', id: iconFid }, { hover: true });
+            _setMarkerFeatureState(iconFid, { hover: true });
         }
         _updateHoverFilter();
     }
@@ -782,8 +852,7 @@ const MapManager = (() => {
      * `hoveredFeatureId` state as real mouse hover, so the two interleave
      * cleanly. No-op if the location has no currently-rendered marker.
      *
-     * With `labelEvent`, the label's second line shows that event's name
-     * instead of the location's default label event.
+     * With `labelEvent`, the icon and label show that specific event.
      */
     function highlightLocationByKey(locationKey, { labelEvent = null } = {}) {
         const map = state.mapInstance;
@@ -831,7 +900,7 @@ const MapManager = (() => {
         // Hover handlers — use mousemove (not mouseenter) so that when
         // markers overlap, moving between them updates the hovered feature
         // immediately rather than staying stuck on the first one entered.
-        map.on('mousemove', 'marker-symbols', (e) => {
+        map.on('mousemove', 'marker-hit-targets', (e) => {
             map.getCanvas().style.cursor = 'pointer';
             const feature = _closestFeature(e);
             if (feature) {
@@ -845,14 +914,17 @@ const MapManager = (() => {
             }
         });
 
-        map.on('mouseleave', 'marker-symbols', () => {
+        map.on('mouseleave', 'marker-hit-targets', () => {
             map.getCanvas().style.cursor = '';
             _setHoveredIcon(null);
         });
 
         // Click: open popup for the closest marker to the click point
-        map.on('click', 'marker-symbols', (e) => {
-            const feature = _closestFeature(e);
+        map.on('click', (e) => {
+            // Labels and promoted emoji remain clickable; dots have no hit targets.
+            const features = map.queryRenderedFeatures(e.point,
+                { layers: ['marker-hit-targets', 'marker-symbols', 'marker-symbols-hover'] });
+            const feature = _closestFeature({ ...e, features });
             if (feature) {
                 const locationKey = feature.properties.locationKey;
                 _openPopupForLocation(locationKey, e.lngLat);
@@ -866,20 +938,13 @@ const MapManager = (() => {
         map.on('click', (e) => {
             const sheetActive = typeof Sheet !== 'undefined' && (Sheet.isOpen() || Sheet.isDetailMode());
             if (!sheetActive) return;
-            const features = map.queryRenderedFeatures(e.point, { layers: ['marker-symbols'] });
+            const features = map.queryRenderedFeatures(e.point,
+                { layers: ['marker-hit-targets', 'marker-symbols', 'marker-symbols-hover'] });
             if (features.length > 0) return; // clicked a marker, not empty space
             // If a popup is open, this click only closes the popup (handled by the
             // popup's own closeOnClick) — leave the sheet open. The next empty
             // click, with no popup, collapses/dismisses the sheet.
             if (state.currentPopup) return;
-            // Desktop panel-detail mirrors that two-step: first empty click
-            // exits detail back to the list, the next collapses the sheet.
-            if (!Utils.isMobileLayout() && ProtoFlags.isOn('popups', 'panel') && Sheet.isDetailMode()) {
-                Sheet.closeDetail();
-                return;
-            }
-            // Docked layout: the panel is permanent — never collapse it.
-            if (!Utils.isMobileLayout() && ProtoFlags.isOn('layout', 'docked')) return;
             Sheet.dismissToMini();
         });
     }
@@ -911,20 +976,19 @@ const MapManager = (() => {
 
         // Clear previous active state
         if (state.activeFeatureId !== null) {
-            map.setFeatureState({ source: 'markers', id: state.activeFeatureId }, { active: false });
+            _setMarkerFeatureState(state.activeFeatureId, { active: false });
         }
 
         // Set new active state
         const fid = state.locationKeyToFeatureId.get(locationKey);
         if (fid !== undefined) {
             state.activeFeatureId = fid;
-            map.setFeatureState({ source: 'markers', id: fid }, { active: true });
+            _setMarkerFeatureState(fid, { active: true });
         }
         _updateHoverFilter();
 
-        // Mobile — and desktop under the popups=panel prototype — show the
-        // popup content inside the sheet (detail mode)
-        const useSheetDetail = Utils.isMobileLayout() || ProtoFlags.isOn('popups', 'panel');
+        // Mobile shows popup content inside the sheet (detail mode).
+        const useSheetDetail = Utils.isMobileLayout();
         if (useSheetDetail && typeof Sheet !== 'undefined') {
             state.currentPopup = null;
             state.currentPopupLocationKey = locationKey;
@@ -949,7 +1013,7 @@ const MapManager = (() => {
 
                 // Clear active state
                 if (state.activeFeatureId !== null) {
-                    map.setFeatureState({ source: 'markers', id: state.activeFeatureId }, { active: false });
+                    _setMarkerFeatureState(state.activeFeatureId, { active: false });
                     state.activeFeatureId = null;
                 }
 
@@ -1003,22 +1067,14 @@ const MapManager = (() => {
     // THEME
     // ========================================
 
-    /**
-     * Applies every theme-dependent marker property to the live layers:
-     * label/halo paint colors, the label fontstack (text-field expressions
-     * embed font literals, so those are re-set too), the highlight-ring glow,
-     * and the per-feature marker/event-label colors (re-derived through
-     * TagColorManager so emoji transforms and theme L/C overrides take
-     * effect; for a plain dark↔light switch the derivation is cache-identical
-     * and this is a no-op). Called after style restores and on in-place theme
-     * switches that don't swap the style JSON.
-     */
+    /** Refreshes marker colors and labels after the map style changes. */
     function applyThemeToLayers() {
         const map = state.mapInstance;
         if (!map || !map.getLayer('marker-symbols')) return;
 
-        const def = Themes.resolve(Utils.getCurrentTheme());
         const font = _getMarkerTextFont();
+        _syncIconEpoch();
+        _syncDotTheme();
 
         map.setPaintProperty('marker-symbols', 'text-color', _getLabelColor());
         map.setPaintProperty('marker-symbols', 'text-halo-color', _getHaloColor());
@@ -1032,52 +1088,23 @@ const MapManager = (() => {
             // Any per-event hover override embedded the old font/colors — reset
             state.hoverLabelEventSig = null;
             map.setLayoutProperty('marker-symbols-hover', 'text-field', _getTextFieldExpression());
+            map.setLayoutProperty('marker-symbols-hover', 'icon-image', _getIconImageExpression());
         }
 
-        if (map.getLayer('marker-highlight')) {
-            const glow = !!def.ringGlow;
-            map.setPaintProperty('marker-highlight', 'circle-blur', glow ? 0.35 : 0);
-            map.setPaintProperty('marker-highlight', 'circle-stroke-width', [
-                'case',
-                ['boolean', ['feature-state', 'active'], false], glow ? 5 : 4,
-                ['boolean', ['feature-state', 'hover'], false], glow ? 5 : 4,
-                0
-            ]);
-        }
-
-        // Re-derive baked per-feature colors under the current theme. Marker
-        // color first (emoji transforms shift it), then the event-label color
-        // derived from it (theme lightness). Expanded-label features don't
-        // carry emojiImageId — resolve it through their location's icon
-        // feature so their colors re-derive too.
         if (state.sourceDataCache) {
-            let changed = false;
-            const featuresArr = state.sourceDataCache.features;
-            featuresArr.forEach(f => {
-                let emojiId = f.properties.emojiImageId;
-                if (!emojiId) {
-                    const iconFid = state.locationKeyToFeatureId.get(f.properties.locationKey);
-                    const icon = iconFid !== undefined ? featuresArr[iconFid] : null;
-                    emojiId = icon && icon.properties.emojiImageId;
-                }
-                if (emojiId) {
-                    const color = TagColorManager.getColorForEmoji(emojiId.slice(6)) || '#444';
-                    if (f.properties.color !== color) {
-                        f.properties.color = color;
-                        changed = true;
-                    }
-                }
-                if (f.properties.labelType !== 'expanded') return;
-                const next = _toEventLabelColor(f.properties.color);
-                if (f.properties.eventLabelColor !== next) {
-                    f.properties.eventLabelColor = next;
-                    changed = true;
-                }
+            state.sourceDataCache.features.forEach(f => {
+                const iconId = state.locationKeyToFeatureId.get(f.properties.locationKey);
+                const icon = state.sourceDataCache.features[iconId];
+                const descriptor = state.iconDescriptors.get(icon?.properties.iconImageId);
+                if (descriptor) f.properties.color = IconManager.getColor({ icon_id: descriptor.id });
             });
-            if (changed) {
-                const source = map.getSource('markers');
-                if (source) source.setData(state.sourceDataCache);
+            for (const key of state.promotedPlaces) {
+                const id = state.locationKeyToFeatureId.get(key);
+                if (id === undefined) continue;
+                _setMarkerFeatureState(id, { accent: state.sourceDataCache.features[id].properties.color });
+                state.accentedFeatureIds.add(id);
             }
+            refreshPromotedMarkers();
         }
     }
 
@@ -1085,17 +1112,8 @@ const MapManager = (() => {
     // UTILITY
     // ========================================
 
-    // Resolve a location's marker color from its emoji. The color is derived live
-    // from the emoji's rendered pixels under the active emoji font (system or Noto),
-    // so it matches the glyph the viewer sees. TagColorManager owns the (font-aware)
-    // extraction + cache; this just delegates.
-    function getMarkerColor(locationInfo) {
-        if (locationInfo && locationInfo.emoji &&
-            typeof TagColorManager !== 'undefined' && TagColorManager.getColorForEmoji) {
-            const color = TagColorManager.getColorForEmoji(locationInfo.emoji);
-            if (color) return color;
-        }
-        return '#444';
+    function getMarkerColor(record) {
+        return IconManager.getColor(record || {});
     }
 
     function getMap() {
@@ -1109,7 +1127,7 @@ const MapManager = (() => {
     function clearActiveState() {
         const map = state.mapInstance;
         if (state.activeFeatureId !== null && map) {
-            map.setFeatureState({ source: 'markers', id: state.activeFeatureId }, { active: false });
+            _setMarkerFeatureState(state.activeFeatureId, { active: false });
             state.activeFeatureId = null;
         }
         state.currentPopupLocationKey = null;
@@ -1129,10 +1147,9 @@ const MapManager = (() => {
         getCurrentPopup,
         getCurrentPopupLocationKey,
         clearActiveState,
-        loadEmojiImages,
-        loadEmojiImagesChunked,
-        reloadEmojiImages,
+        reloadIconImages,
         updateMarkerData,
+        refreshPromotedMarkers,
         setupMarkerInteractions,
         openPopupAtCoordinates,
         registerPopupCallback,

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128"><title>Choir</title><desc>Three singers with open mouths sing with floating musical notes.</desc>
+<path d="M13 83V63c0-17 36-17 36 0v34q-18 8-36 0z" fill="#168BAA"/><path d="M45 80V54c0-18 38-18 38 0v39q-19 9-38 0z" fill="#CF558D"/><path d="M79 83V63c0-17 36-17 36 0v34q-18 8-36 0z" fill="#5683B7"/>
+<ellipse cx="31" cy="34" rx="16" ry="20" fill="#7A503C"/><ellipse cx="31" cy="38" rx="13" ry="16" fill="#E4A276"/><path d="M17 31c0-16 28-16 28 0-10 0-13-7-14-10-2 6-7 10-14 10z" fill="#49352E"/>
+<ellipse cx="64" cy="28" rx="16" ry="20" fill="#5B4438"/><ellipse cx="64" cy="33" rx="13" ry="16" fill="#FFD0A7"/><path d="M49 28c0-18 29-18 30 0-11 2-19-3-22-8-1 4-4 7-8 8z" fill="#805133"/>
+<ellipse cx="97" cy="34" rx="16" ry="20" fill="#352F2E"/><ellipse cx="97" cy="39" rx="13" ry="16" fill="#AC7656"/><path d="M82 32c0-18 31-18 30 0-6-3-8-7-12-9-5 6-12 8-18 9z" fill="#352F2E"/>
+<g fill="#49352E"><ellipse cx="31" cy="46" rx="3.5" ry="4.5"/><ellipse cx="64" cy="41" rx="3.5" ry="4.5"/><ellipse cx="97" cy="47" rx="3.5" ry="4.5"/></g>
+<g stroke="#49352E" stroke-width="2" stroke-linecap="round"><path d="M25 36h2m8 0h2m21-5h2m8 0h2m21 6h2m8 0h2"/></g>
+<g fill="#596D78"><g transform="translate(9 60)"><path d="M0 0h3v21h-3zM2 0q13 2 7 12V7L2 5Z"/><ellipse cx="-3" cy="21" rx="5" ry="3.5"/></g><g transform="translate(117 56)"><path d="M0 0h3v21h-3zM2 0q10 2 5 12V7L2 5Z"/><ellipse cx="-3" cy="21" rx="5" ry="3.5"/></g></g></svg>

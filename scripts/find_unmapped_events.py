@@ -119,6 +119,17 @@ SKIP_LOCATION_NAMES = {
     # event is already pinned to the neighborhood the tour or action covers.
     'mas tours', 'mas nyc', 'dancing classrooms', 'hands off nyc',
     'nyc bike + brew', 'nyc bike and brew',
+    # membership clubs / hobby societies with no premises of their own. Each
+    # posts from its own site, so the club name arrives as location_name on
+    # every listing while the actual address is emailed after RSVP.
+    'tribeca club', 'lower east side cactus & succulent society',
+    # bare hotel brand — a 'Hilton' alias would be a catch-all across every
+    # Hilton property, and the real one is only ever named in the listing body.
+    'hilton',
+    # contentless venue labels: too generic to ever resolve, and the sources
+    # that emit them (Partiful DIY shows, queer party series) withhold the
+    # address until RSVP.
+    'the basement', 'the location will be revealed on the event date.',
     # extraction placeholders
     'not specified in provided content',
     'new york city metro area (exact location unspecified)',
@@ -166,6 +177,37 @@ SKIP_LOCATION_NAMES = {
     # address deliberately withheld by the organizer; the neighborhood/host pin
     # is the best mapping that will ever exist.
     'soho sukkah', 'connors elementary school', 'throughout the rivertowns',
+    # 2026-09-09 unmapped sweep. Each string was verified against the live source page
+    # before being listed: the event is already pinned as well as it ever can be, and the
+    # string names no resolvable venue (virtual platform, withheld/private address, an
+    # org/agency label, a multi-block street-fair route, or a bare neighborhood/ZIP).
+    'online goto webinar', 'online meeting', 'teams (virtual)', 'zoom webinar',
+    'links will be provided after registration', 'virtual/online events',
+    'a secret private social club', "ami's", 'flower district', 'tbd, brooklyn',
+    'uptown + the bronx (exact location tba)', 'multiple locations around brooklyn',
+    'manhattan & brooklyn', 'manhattan to liberty island', 'check site for details.',
+    'third avenue', '129 atlantic avenue', 'corner of 6th street and 8th avenue',
+    'cadman plaza in brooklyn, across the brooklyn bridge, concluding at foley square, manhattan',
+    'bensonhurst', 'yorkville', 'bronx, ny 10467', 'new york, ny 10007',
+    # ORG/agency names emitted as the venue by their own feed. Each rovers between venues,
+    # so an alt name would mis-pin every future listing.
+    'russian american cultural center', 'union county park system',
+    # 2026-09-11 unmapped sweep. Each string was researched against the live source page
+    # before being listed; none names a venue that can ever resolve, and the event is
+    # already pinned as well as it ever will be.
+    #   org / program name emitted as the venue
+    'spike polite radio show', 'amadou ly foundation', 'bronx poetry house',
+    #   organizer withholds the address until signup/RSVP
+    'tbd / sent to registrants', 'location tbu', 'brooklyn industrial space',
+    'williamsburg rooftop', 'brooklyn, ny',
+    #   private residences (Partiful house shows) — must never get a locations row
+    "1120 st. john's place", '413 e 84th st apt 1 (buzz bartos, kitchin, or imamura)',
+    #   bare ZIP with the real address emailed after signup (NYC Service)
+    'new york, ny 10037', 'queens, ny 11377',
+    #   sub-facility label inside the mapped park, and in-park route endpoints
+    'ballfield 11', 'dinosaur playground to ellington in the park, new york',
+    #   street the PuppetMobile performs on; the event is pinned to the neighborhood
+    '5th avenue',
 }
 
 # Websites whose feed emits the HOST/PARTNER ORG as `location_name` for every
@@ -179,6 +221,10 @@ SKIP_LOCATION_NAMES = {
 SKIP_MISMATCH_WEBSITES = {
     'New York Cares',
     'NYC Service',
+    # Emits its own shop name as location_name for group rides that actually start at
+    # Ronkonkoma LIRR. Handled here rather than in SKIP_LOCATION_NAMES because
+    # "Principles GI Coffee House" is a legitimate venue (location 2214) for other sources.
+    'Principles GI Coffee House',
 }
 
 # Street-intersection patterns: outdoor markets / waste drop-offs / flea markets
