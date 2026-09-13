@@ -30,14 +30,23 @@ load_dotenv()
 import db  # noqa: E402
 
 
+def _bare(name, scope):
+    """DB tag name. The export prefixes venue-scope names with 'venue:' for unique
+    frontend keys; the database stores them bare with scope='venue'."""
+    if scope == 'venue' and name.startswith('venue:'):
+        return name[len('venue:'):]
+    return name
+
+
 def _neighborhood_family(tags):
-    """Venue tag names that are descendants of 'Neighborhood' (NYC geography)."""
+    """Venue tag names (bare) that are descendants of 'Neighborhood' (NYC geography)."""
     children = {}
     for t in tags:
         if t.get('scope') != 'venue':
             continue
+        child = _bare(t['name'], 'venue')
         for p in t.get('parents') or []:
-            children.setdefault(p, []).append(t['name'])
+            children.setdefault(_bare(p, 'venue'), []).append(child)
     skip, stack = set(), ['Neighborhood']
     while stack:
         cur = stack.pop()
@@ -52,7 +61,7 @@ def main(path):
     data = json.load(open(path))
     tags = data['tags']
     skip = _neighborhood_family(tags)
-    keep = [t for t in tags if not (t.get('scope') == 'venue' and t['name'] in skip)]
+    keep = [t for t in tags if not (t.get('scope') == 'venue' and _bare(t['name'], 'venue') in skip)]
     print(f"source tags: {len(tags)} | skipping {len(skip)} NYC-neighborhood venue tags | loading {len(keep)}")
 
     conn = db.create_connection()
@@ -68,7 +77,7 @@ def main(path):
             "VALUES (%s,%s,'tag',%s,%s,%s,%s) "
             "ON DUPLICATE KEY UPDATE type='tag', emoji=VALUES(emoji), icon_id=VALUES(icon_id), "
             "is_quick_filter=VALUES(is_quick_filter), display_order=VALUES(display_order)",
-            (t['name'], t['scope'], t.get('emoji'), t.get('icon_id'),
+            (_bare(t['name'], t['scope']), t['scope'], t.get('emoji'), t.get('icon_id'),
              1 if t.get('quickFilter') else 0, t.get('order')))
     conn.commit()
 
@@ -79,9 +88,9 @@ def main(path):
     # 2. Hierarchy edges (within scope)
     edges = 0
     for t in keep:
-        cid = ids.get((t['name'], t['scope']))
+        cid = ids.get((_bare(t['name'], t['scope']), t['scope']))
         for p in t.get('parents') or []:
-            pid = ids.get((p, t['scope']))
+            pid = ids.get((_bare(p, t['scope']), t['scope']))
             if pid and cid:
                 cur.execute("INSERT IGNORE INTO tag_hierarchy (parent_tag_id, child_tag_id) VALUES (%s,%s)", (pid, cid))
                 edges += cur.rowcount
@@ -90,7 +99,7 @@ def main(path):
     # 3. Aliases (scope-keyed; PK is (scope, alias) so first writer wins)
     aliases = 0
     for t in keep:
-        tid = ids.get((t['name'], t['scope']))
+        tid = ids.get((_bare(t['name'], t['scope']), t['scope']))
         if not tid:
             continue
         for a in t.get('aliases') or []:
