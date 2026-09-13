@@ -15,6 +15,7 @@
 !/.claude/
 !/config/
 !/database/
+!/deploy/
 !/mobile/
 !/pipeline/
 !/scripts/

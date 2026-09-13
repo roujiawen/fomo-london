@@ -1,0 +1,453 @@
+# fomo.london — city/region configuration
+#
+# London fork of config/nyc.yaml. This is the single file holding every
+# London-specific string the backend engine needs. The engine reads it via
+# pipeline/city_config.py (config/<FOMO_CITY>.yaml). Activate with:
+#   export FOMO_CITY=london            # backend (pipeline)
+#   FOMO_CITY=london npm run build     # frontend (build.js)
+#
+# See .claude/rules/city-config.md and .claude/rules/build-system.md for how each
+# field is consumed. Fields mirror config/nyc.yaml one-for-one.
+
+city_name: "London"
+city_short: "London"
+metro_name: "Greater London"
+
+# Frontend config — injected into the built site by build.js (window.__CITY__ for the
+# JS bundle + {{TOKEN}} branding replacement in src/index.html). See build.js.
+frontend:
+  site_name: "Fomo London"        # <title>, logo alt, search placeholder, menu
+  domain: "fomo.london"           # branding TEXT only ("Search fomo.london"), NOT a live URL.
+                                  # Safe to keep as the intended permanent name while you
+                                  # run on a temp domain — all asset/API links are relative.
+  emoji: "🎡"                      # menu / feedback decoration (London Eye)
+  timezone: "Europe/London"       # utils.js: "today" + event-time parsing
+  sw_enabled: true                # offline service worker (false emits a self-unregistering sw.js)
+  # Full welcome-modal body (HTML), injected verbatim into #welcome-modal .modal-body.
+  welcome_modal: |
+    <ul>
+        <li><span class="emoji-bullet">🎡</span><span><strong>Fomo London</strong> is a map of upcoming events in the Greater London area.</span></li>
+        <li><span class="emoji-bullet">🤖</span><span>Events are collected automatically from many different websites every day.</span></li>
+        <li><span class="emoji-bullet">💖</span><span>This project is a labor of love and will always be free and open-source.</span></li>
+    </ul>
+  map:
+    center: [51.5074, -0.1278]     # [lat, lng] initial map view (central London)
+    zoom: 11
+
+extraction:
+  # extractor.py get_chunk_prompt — the full opening line. {date} is substituted.
+  chunk_intro: "Today's date is {date}. Extract ALL events from this London events page content."
+  # extractor.py get_prompt — the full opening line. {date}, {name}, {url} are substituted.
+  intro: "Today's date is {date}. We are assembling a database of upcoming events in London. Currently, we are inspecting {name} ({url})."
+  # extractor.py get_prompt hashtag-guidance tail.
+  tag_avoidance: "Avoid location-specific or London-redundant tags."
+  # extractor.py get_prompt: the full metro-geography rule bullet (verbatim).
+  # This prose is the extractor's FIRST filter — an event this rule tells Gemini to
+  # skip is dropped before any coverage test runs, so keep it aligned with the
+  # coverage: block below.
+  region_rule: "Only include events in the Greater London area within the next 3 months. Greater London covers the City of London and all 32 London boroughs within the M25 (Travelcard Zones 1-6): Westminster, Camden, Islington, Hackney, Tower Hamlets, Southwark, Lambeth, Wandsworth, Kensington & Chelsea, Hammersmith & Fulham, Greenwich, Lewisham, Newham, Haringey, Brent, Ealing, Hounslow, Richmond upon Thames, Kingston upon Thames, Merton, Sutton, Croydon, Bromley, Bexley, Barking & Dagenham, Havering, Redbridge, Waltham Forest, Enfield, Barnet, Harrow, and Hillingdon. Skip events at venues outside Greater London (e.g. Brighton, Oxford, Cambridge, Reading, Watford beyond the M25, Birmingham, Manchester, Paris, or elsewhere)."
+
+# db.py _load_generic_location_names() — city-level names added on top of the geotags list below.
+generic_location_names:
+  - "london"
+  - "greater london"
+  - "central london"
+  - "city of london"
+  - "the city"
+  - "uk"
+  - "united kingdom"
+
+# Geographic "geotag" names (boroughs, neighbourhoods, districts, parks) across
+# Greater London. Two city-agnostic consumers read this one list:
+#   - Backend: city_config.geotags() -> db.py _load_generic_location_names treats
+#     them as generic (too-vague-to-be-a-venue) location names, triggering a
+#     detail crawl to find the specific venue.
+#   - Frontend: build.js writes them into the generated src/data/tags.json, which
+#     the map uses to hide neighbourhood names from event tag displays.
+# This is a solid starter set (~160). Expand as you find venues mapping to bare
+# area names during review.
+geotags:
+  # --- Boroughs / City ---
+  - "City of London"
+  - "Barking and Dagenham"
+  - "Barnet"
+  - "Bexley"
+  - "Brent"
+  - "Bromley"
+  - "Camden"
+  - "Croydon"
+  - "Ealing"
+  - "Enfield"
+  - "Greenwich"
+  - "Hackney"
+  - "Hammersmith and Fulham"
+  - "Haringey"
+  - "Harrow"
+  - "Havering"
+  - "Hillingdon"
+  - "Hounslow"
+  - "Islington"
+  - "Kensington and Chelsea"
+  - "Kingston upon Thames"
+  - "Lambeth"
+  - "Lewisham"
+  - "Merton"
+  - "Newham"
+  - "Redbridge"
+  - "Richmond upon Thames"
+  - "Southwark"
+  - "Sutton"
+  - "Tower Hamlets"
+  - "Waltham Forest"
+  - "Wandsworth"
+  - "Westminster"
+  # --- Central / West End districts ---
+  - "Soho"
+  - "Covent Garden"
+  - "Mayfair"
+  - "Marylebone"
+  - "Fitzrovia"
+  - "Bloomsbury"
+  - "Holborn"
+  - "Clerkenwell"
+  - "Farringdon"
+  - "Barbican"
+  - "St James's"
+  - "Westminster"
+  - "Pimlico"
+  - "Belgravia"
+  - "Knightsbridge"
+  - "Victoria"
+  - "Strand"
+  - "Aldwych"
+  - "Temple"
+  - "Bankside"
+  - "Southbank"
+  - "South Bank"
+  - "Waterloo"
+  - "The City"
+  - "Square Mile"
+  - "Shoreditch"
+  - "Hoxton"
+  - "Spitalfields"
+  - "Whitechapel"
+  - "Aldgate"
+  - "Bethnal Green"
+  # --- North ---
+  - "Angel"
+  - "King's Cross"
+  - "Kings Cross"
+  - "Camden Town"
+  - "Kentish Town"
+  - "Chalk Farm"
+  - "Primrose Hill"
+  - "Hampstead"
+  - "Belsize Park"
+  - "Highgate"
+  - "Archway"
+  - "Holloway"
+  - "Finsbury Park"
+  - "Crouch End"
+  - "Muswell Hill"
+  - "Wood Green"
+  - "Tottenham"
+  - "Stoke Newington"
+  - "Dalston"
+  - "Hackney Wick"
+  - "London Fields"
+  - "Clapton"
+  - "Walthamstow"
+  - "Leyton"
+  - "Leytonstone"
+  - "Stratford"
+  - "Wembley"
+  - "Willesden"
+  - "Kilburn"
+  - "Cricklewood"
+  - "Golders Green"
+  - "Finchley"
+  - "Barnet"
+  - "Enfield"
+  # --- East ---
+  - "Canary Wharf"
+  - "Isle of Dogs"
+  - "Poplar"
+  - "Bow"
+  - "Mile End"
+  - "Hackney"
+  - "Bethnal Green"
+  - "Wapping"
+  - "Limehouse"
+  - "Bermondsey"
+  - "Rotherhithe"
+  - "Deptford"
+  - "New Cross"
+  - "Ilford"
+  - "Romford"
+  - "Barking"
+  - "Dagenham"
+  # --- South ---
+  - "Greenwich"
+  - "Blackheath"
+  - "Lewisham"
+  - "Peckham"
+  - "Camberwell"
+  - "Elephant and Castle"
+  - "Kennington"
+  - "Vauxhall"
+  - "Nine Elms"
+  - "Battersea"
+  - "Clapham"
+  - "Brixton"
+  - "Stockwell"
+  - "Streatham"
+  - "Balham"
+  - "Tooting"
+  - "Wandsworth"
+  - "Putney"
+  - "Wimbledon"
+  - "Dulwich"
+  - "Herne Hill"
+  - "Crystal Palace"
+  - "Sydenham"
+  - "Croydon"
+  - "Bromley"
+  - "Woolwich"
+  - "Eltham"
+  # --- West ---
+  - "Notting Hill"
+  - "Ladbroke Grove"
+  - "Bayswater"
+  - "Paddington"
+  - "Maida Vale"
+  - "Little Venice"
+  - "Kensington"
+  - "South Kensington"
+  - "West Kensington"
+  - "Earl's Court"
+  - "Chelsea"
+  - "Fulham"
+  - "Hammersmith"
+  - "Shepherd's Bush"
+  - "White City"
+  - "Chiswick"
+  - "Acton"
+  - "Ealing"
+  - "Brentford"
+  - "Richmond"
+  - "Kew"
+  - "Twickenham"
+  - "Kingston"
+  - "Hounslow"
+  - "Harrow"
+  # --- Parks / open spaces ---
+  - "Hyde Park"
+  - "Regent's Park"
+  - "Regents Park"
+  - "St James's Park"
+  - "Green Park"
+  - "Kensington Gardens"
+  - "Hampstead Heath"
+  - "Victoria Park"
+  - "Greenwich Park"
+  - "Richmond Park"
+  - "Battersea Park"
+  - "Clapham Common"
+  - "Wimbledon Common"
+  - "Finsbury Park"
+  - "Alexandra Palace"
+  - "Crystal Palace Park"
+  - "Olympic Park"
+  - "Queen Elizabeth Olympic Park"
+  - "Hampton Court"
+  - "Kew Gardens"
+
+# Geographic coverage area. Read via city_config.coverage().
+#
+# SCOPE: this block is REVIEW-ONLY. It is not consumed by the crawl/extract/export
+# pipeline — the pipeline's geographic gate is extraction.region_rule (sent to Gemini)
+# plus the frontend map view. coverage() is read solely by a CoverageArea helper used
+# by scripts/find_review_candidates.py to flag likely out-of-region events for manual
+# culling. So leaving it US-shaped does NOT affect what gets crawled, mapped, or shown.
+#
+# CAVEAT: CoverageArea lives in find_out_of_area_events.py, which is NOT shipped in the
+# public repo — so the coverage-dependent arms of find_review_candidates.py currently
+# ImportError (true upstream for NYC too). Nothing to fix for launch.
+#
+# FOLLOW-UP (only if you later want out-of-region review tooling): write a UK
+# CoverageArea that classifies by postcode outward code instead of US "<ST> <ZIP>".
+# `zip3` is intentionally empty to disable the US path; `postcode_areas` documents the
+# intended UK coverage for that future work; `bbox` is the coarse lat/lng fallback.
+coverage:
+  zip3: {}   # US-only path disabled for London — see FOLLOW-UP above.
+  # UK outward-code AREAS that make up Greater London (for the future UK classifier).
+  postcode_areas:
+    - "EC"   # City of London
+    - "WC"   # Holborn / Covent Garden
+    - "E"    # East London
+    - "N"    # North London
+    - "NW"   # North West London
+    - "SE"   # South East London
+    - "SW"   # South West London
+    - "W"    # West London
+    # Outer London (partial areas — refine to district level when porting):
+    - "BR"   # Bromley
+    - "CR"   # Croydon
+    - "DA"   # Dartford/Bexley (London part)
+    - "EN"   # Enfield (London part)
+    - "HA"   # Harrow
+    - "IG"   # Ilford/Redbridge
+    - "KT"   # Kingston (London part)
+    - "RM"   # Romford/Havering
+    - "SM"   # Sutton
+    - "TW"   # Twickenham/Hounslow (London part)
+    - "UB"   # Uxbridge/Hillingdon
+    - "WD"   # Watford (London fringe — trim beyond M25 when porting)
+  # Coarse lat/lng envelope, used when an address has no parseable postcode.
+  # Roughly the M25 / Greater London boundary.
+  bbox:
+    min_lat: 51.26    # southern edge (Croydon / Bromley)
+    max_lat: 51.72    # northern edge (Enfield / Barnet)
+    min_lng: -0.56    # western edge (Hillingdon / Heathrow)
+    max_lng: 0.33     # eastern edge (Havering / Upminster)
+
+processor:
+  # processor.py normalize_location_name — trailing region suffixes stripped.
+  state_suffixes: [" london", " uk", " united kingdom", " england", " greater london"]
+  # processor.py normalize_location_name — bare area names that collapse to "" (too generic).
+  city_area_tokens:
+    - "london"
+    - "greater london"
+    - "central london"
+    - "city of london"
+    - "the city"
+    - "west end"
+    - "east london"
+    - "north london"
+    - "south london"
+    - "west london"
+  # processor.py has_dash_before_borough — borough subset used to detect "<thing> - <borough>".
+  borough_tokens:
+    - "camden"
+    - "hackney"
+    - "islington"
+    - "westminster"
+    - "southwark"
+    - "lambeth"
+    - "tower hamlets"
+    - "greenwich"
+    - "wandsworth"
+    - "kensington and chelsea"
+    - "hammersmith and fulham"
+  # processor.py — standalone region token stripped from tag / short_name (e.g. "London Comedy" -> "Comedy").
+  region_tag_token: "London"
+  # processor.py address parsing. These values are unioned straight into
+  # processor._ADDR_STREET_TYPES, which recognises the street part of an address so
+  # the pipeline can match/dedupe locations (quality only — it never filters events).
+  # The base set already covers Road, Lane, Avenue, Square, Place, Court, Drive, Way,
+  # Terrace, Street (via processor._ADDR_LONG_TO_SHORT), so we only add the UK types
+  # the base set lacks, plus central-London street NAMES that carry no type suffix
+  # (mirrors NYC's Broadway/Bowery).
+  address:
+    extra_street_types:
+      # UK generic street types missing from the base (US) set:
+      - "mews"
+      - "crescent"
+      - "grove"
+      - "gardens"
+      - "close"
+      - "row"
+      - "walk"
+      - "hill"
+      - "rise"
+      - "parade"
+      - "wharf"
+      - "embankment"
+      - "gate"
+      - "green"
+      - "villas"
+      - "vale"
+      # Typeless central-London street names (behave like a street type on their own):
+      - "strand"
+      - "whitehall"
+      - "aldwych"
+      - "haymarket"
+      - "cheapside"
+      - "piccadilly"
+      - "pall mall"
+    # Names that can stand alone with no preceding name word ("150 Strand").
+    standalone_street_names: ["strand", "whitehall", "piccadilly", "aldwych", "haymarket", "cheapside"]
+
+review:
+  # scripts/find_review_candidates.py NON_REGION_PLACES — names that, in an event's
+  # location_name, suggest it is outside Greater London. Word-boundary matched.
+  # Omit names that overlap London venues/streets.
+  non_region_places:
+    # --- UK cities/regions outside London ---
+    - "Birmingham"
+    - "Manchester"
+    - "Liverpool"
+    - "Leeds"
+    - "Sheffield"
+    - "Bristol"
+    - "Newcastle"
+    - "Nottingham"
+    - "Leicester"
+    - "Cardiff"
+    - "Edinburgh"
+    - "Glasgow"
+    - "Belfast"
+    - "Brighton"
+    - "Oxford"
+    - "Cambridge"
+    - "Reading"
+    - "Milton Keynes"
+    - "Luton"
+    - "Southampton"
+    - "Portsmouth"
+    - "Bournemouth"
+    - "Bath"
+    - "Coventry"
+    - "Norwich"
+    - "Exeter"
+    - "Plymouth"
+    - "York"
+    - "Blackpool"
+    - "Cornwall"
+    - "Devon"
+    - "Lake District"
+    - "Cotswolds"
+    - "Peak District"
+    - "Scotland"
+    - "Wales"
+    - "Northern Ireland"
+    - "Ireland"
+    # --- International ---
+    - "Paris"
+    - "Amsterdam"
+    - "Berlin"
+    - "Madrid"
+    - "Barcelona"
+    - "Rome"
+    - "Milan"
+    - "Lisbon"
+    - "Dublin"
+    - "Brussels"
+    - "Copenhagen"
+    - "Stockholm"
+    - "Vienna"
+    - "Prague"
+    - "Budapest"
+    - "Warsaw"
+    - "Athens"
+    - "New York"
+    - "Los Angeles"
+    - "Tokyo"
+    - "Dubai"
+    - "Sydney"
+    - "Various locations"
+    - "Various venues"
+    - "Multiple locations"
+    - "Multiple venues"
+    - "Online"
+    - "Virtual"
