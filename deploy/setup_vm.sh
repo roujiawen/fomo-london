@@ -59,7 +59,11 @@ systemctl enable --now mariadb
 # reachable. The pipeline (db.py, FOMO_ENV=local) connects as root over TCP with
 # an empty password — we grant exactly that, localhost-only, to avoid a code change.
 # PHP connects as a password-protected app user.
-mariadb <<SQL
+#
+# --default-character-set=utf8mb4 is REQUIRED on every load: the mariadb client's
+# connection charset defaults to utf8mb3 on a stock Ubuntu box, which rejects the
+# 4-byte emoji in the seed/config data ("ERROR 1366 Incorrect string value").
+mariadb --default-character-set=utf8mb4 <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO 'root'@'127.0.0.1';
@@ -70,8 +74,8 @@ SQL
 
 # Load schema + London seed (schema uses CREATE TABLE IF NOT EXISTS; seed is idempotent)
 echo "    loading schema.sql + seed_london_websites.sql"
-mariadb "${DB_NAME}" < "${REPO_DIR}/database/schema.sql"
-mariadb "${DB_NAME}" < "${REPO_DIR}/database/seed_london_websites.sql"
+mariadb --default-character-set=utf8mb4 "${DB_NAME}" < "${REPO_DIR}/database/schema.sql"
+mariadb --default-character-set=utf8mb4 "${DB_NAME}" < "${REPO_DIR}/database/seed_london_websites.sql"
 
 # ----------------------------------------------------------------------------
 # 3. Python venv + pipeline deps + Playwright browser
