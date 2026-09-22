@@ -138,8 +138,8 @@ SELECT 'Mildmay Club', 'https://mildmay.club', 'Members'' club and events venue,
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Mildmay Club');
 SET @w := (SELECT id FROM websites WHERE name = 'Mildmay Club' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://mildmay.club/whats-on', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://mildmay.club/whats-on');
+SELECT @w, 'https://www.tickettailor.com/events/mildmayclubandinstituteltd', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.tickettailor.com/events/mildmayclubandinstituteltd');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Mildmay Club', 'Mildmay Club', '34 Newington Green, London N16 9PR', 51.5526, -0.0863, '🎭'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Mildmay Club');
@@ -177,8 +177,8 @@ SELECT 'Moth Club', 'https://mothclub.co.uk', 'Music and events venue, Hackney',
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Moth Club');
 SET @w := (SELECT id FROM websites WHERE name = 'Moth Club' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://mothclub.co.uk/listings', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://mothclub.co.uk/listings');
+SELECT @w, 'https://www.songkick.com/venues/3062884-moth-club/calendar', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/3062884-moth-club/calendar');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Moth Club', 'Moth Club', 'Old Trades Hall, Valette St, London E9 6NU', 51.5442, -0.0555, '🎸'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Moth Club');
@@ -190,8 +190,8 @@ SELECT 'Chats Palace', 'https://chatspalace.com', 'Community arts centre, Homert
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Chats Palace');
 SET @w := (SELECT id FROM websites WHERE name = 'Chats Palace' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://chatspalace.com/whats-on', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://chatspalace.com/whats-on');
+SELECT @w, 'https://chatspalace.com/new-events/', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://chatspalace.com/new-events/');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Chats Palace', 'Chats Palace', '42-44 Brooksby''s Walk, London E9 6DF', 51.5497, -0.0466, '🎭'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Chats Palace');
@@ -238,12 +238,12 @@ SET @l := (SELECT id FROM locations WHERE name = 'Jazz Cafe' LIMIT 1);
 INSERT IGNORE INTO website_locations (website_id, location_id, is_primary) VALUES (@w, @l, 1);
 
 INSERT INTO websites (name, base_url, description, crawl_frequency, source_type, emoji)
-SELECT 'Shacklewell Arms', 'https://shacklewellarms.com', 'Music venue and pub, Dalston', 4, 'primary', '🎸'
+SELECT 'Shacklewell Arms', 'https://www.songkick.com/venues/1347121-shacklewell-arms/calendar', 'Music venue and pub, Dalston', 4, 'primary', '🎸'
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Shacklewell Arms');
 SET @w := (SELECT id FROM websites WHERE name = 'Shacklewell Arms' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://shacklewellarms.com', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://shacklewellarms.com');
+SELECT @w, 'https://www.songkick.com/venues/1347121-shacklewell-arms/calendar', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/1347121-shacklewell-arms/calendar');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Shacklewell Arms', 'Shacklewell Arms', '71 Shacklewell Lane, London E8 2EB', 51.5502, -0.0736, '🎸'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Shacklewell Arms');
@@ -255,8 +255,8 @@ SELECT 'FOLD', 'https://fold.london', 'Nightclub, Canning Town', 4, 'primary', '
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'FOLD');
 SET @w := (SELECT id FROM websites WHERE name = 'FOLD' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://fold.london/pages/events', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://fold.london/pages/events');
+SELECT @w, 'https://www.fold.london/tickets', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.fold.london/tickets');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'FOLD', 'FOLD', 'Gillian House, Stephenson St, London E16 4SA', 51.5158, -0.002, '🔊'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'FOLD');
@@ -294,8 +294,8 @@ SELECT 'The Jago', 'https://thejago.com', 'Music and events venue, Dalston', 4, 
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'The Jago');
 SET @w := (SELECT id FROM websites WHERE name = 'The Jago' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://thejago.com/events', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://thejago.com/events');
+SELECT @w, 'https://www.songkick.com/venues/4229084-jago-dalston/calendar', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/4229084-jago-dalston/calendar');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'The Jago', 'The Jago', '440 Kingsland Rd, London E8 4AA', 51.5443, -0.0757, '🎶'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'The Jago');
@@ -320,8 +320,8 @@ SELECT 'V&A East Storehouse', 'https://www.vam.ac.uk', 'Museum storehouse, Queen
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'V&A East Storehouse');
 SET @w := (SELECT id FROM websites WHERE name = 'V&A East Storehouse' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://www.vam.ac.uk/east/whats-on', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.vam.ac.uk/east/whats-on');
+SELECT @w, 'https://www.vam.ac.uk/whatson?venue=east-storehouse', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.vam.ac.uk/whatson?venue=east-storehouse');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'V&A East Storehouse', 'V&A East Storehouse', 'Parkes St, London E20 3AX', 51.5385, -0.0175, '🏛️'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'V&A East Storehouse');
@@ -333,8 +333,8 @@ SELECT 'Museum of London Docklands', 'https://www.londonmuseum.org.uk', 'London 
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Museum of London Docklands');
 SET @w := (SELECT id FROM websites WHERE name = 'Museum of London Docklands' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://www.londonmuseum.org.uk/whats-on', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.londonmuseum.org.uk/whats-on');
+SELECT @w, 'https://www.londonmuseum.org.uk/whats-on/', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.londonmuseum.org.uk/whats-on/');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Museum of London Docklands', 'Museum of London Docklands', 'No.1 Warehouse, West India Quay, London E14 4AL', 51.5074, -0.0235, '🏛️'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Museum of London Docklands');
