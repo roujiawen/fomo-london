@@ -151,8 +151,8 @@ SELECT 'Dalston Curve Garden', 'https://dalstongarden.org', 'Community garden wi
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Dalston Curve Garden');
 SET @w := (SELECT id FROM websites WHERE name = 'Dalston Curve Garden' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://dalstongarden.org/whats-on', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://dalstongarden.org/whats-on');
+SELECT @w, 'https://www.songkick.com/venues/981936-dalston-eastern-curve-garden/calendar', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/981936-dalston-eastern-curve-garden/calendar');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Dalston Curve Garden', 'Dalston Curve Garden', '13 Dalston Lane, London E8 3DF', 51.5466, -0.0748, '🌿'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Dalston Curve Garden');
@@ -160,12 +160,12 @@ SET @l := (SELECT id FROM locations WHERE name = 'Dalston Curve Garden' LIMIT 1)
 INSERT IGNORE INTO website_locations (website_id, location_id, is_primary) VALUES (@w, @l, 1);
 
 INSERT INTO websites (name, base_url, description, crawl_frequency, source_type, emoji)
-SELECT 'Bethnal Green Working Men''s Club', 'https://www.workersplaytime.net', 'Cabaret and events club (BGWMC)', 4, 'primary', '🎭'
+SELECT 'Bethnal Green Working Men''s Club', 'https://www.songkick.com/venues/9058-bethnal-green-working-mens-club/calendar', 'Cabaret and events club (BGWMC)', 4, 'primary', '🎭'
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Bethnal Green Working Men''s Club');
 SET @w := (SELECT id FROM websites WHERE name = 'Bethnal Green Working Men''s Club' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://www.workersplaytime.net', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.workersplaytime.net');
+SELECT @w, 'https://www.songkick.com/venues/9058-bethnal-green-working-mens-club/calendar', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/9058-bethnal-green-working-mens-club/calendar');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Bethnal Green Working Men''s Club', 'Bethnal Green Working Men''s Club', '42-44 Pollard Row, London E2 6NB', 51.5266, -0.0655, '🎭'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Bethnal Green Working Men''s Club');
@@ -216,8 +216,8 @@ SELECT 'Pelican House', 'https://pelicanhouse.org', 'Social centre and arts spac
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Pelican House');
 SET @w := (SELECT id FROM websites WHERE name = 'Pelican House' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://pelicanhouse.org/events', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://pelicanhouse.org/events');
+SELECT @w, 'https://ma.to/venue/pelican.house', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://ma.to/venue/pelican.house');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Pelican House', 'Pelican House', '144 Cambridge Heath Rd, London E1 5QJ', 51.527, -0.0576, '✊'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Pelican House');
@@ -281,8 +281,8 @@ SELECT 'The Bath House', 'https://thebathhouse.co', 'Cultural hub and community 
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'The Bath House');
 SET @w := (SELECT id FROM websites WHERE name = 'The Bath House' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://thebathhouse.co/whats-on', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://thebathhouse.co/whats-on');
+SELECT @w, 'https://ma.to/venue/the.bath.house.hw', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://ma.to/venue/the.bath.house.hw');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'The Bath House', 'The Bath House', '80 Eastway, London E9 5JH', 51.5452, -0.033, '🛁'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'The Bath House');
@@ -355,14 +355,14 @@ SET @l := (SELECT id FROM locations WHERE name = 'BFI Southbank' LIMIT 1);
 INSERT IGNORE INTO website_locations (website_id, location_id, is_primary) VALUES (@w, @l, 1);
 
 INSERT INTO websites (name, base_url, description, crawl_frequency, source_type, emoji)
-SELECT 'SET Social', 'https://social.setspace.uk', 'Community arts, cafe and events space (SET)', 4, 'primary', '🎨'
+SELECT 'SET Social', 'https://www.outsavvy.com/hashtag/setsocial', 'Community arts, cafe and events space (SET)', 4, 'primary', '🎨'
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'SET Social');
 SET @w := (SELECT id FROM websites WHERE name = 'SET Social' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://social.setspace.uk', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://social.setspace.uk');
+SELECT @w, 'https://www.outsavvy.com/hashtag/setsocial', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.outsavvy.com/hashtag/setsocial');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
-SELECT 'SET Social', 'SET Social', 'London SE15', 51.4725, -0.0685, '🎨'
+SELECT 'SET Social', 'SET Social', '55a Nigel Road, London SE15 5NT', 51.4655, -0.0625, '🎨'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'SET Social');
 SET @l := (SELECT id FROM locations WHERE name = 'SET Social' LIMIT 1);
 INSERT IGNORE INTO website_locations (website_id, location_id, is_primary) VALUES (@w, @l, 1);
