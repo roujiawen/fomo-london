@@ -151,8 +151,8 @@ SELECT 'Dalston Curve Garden', 'https://dalstongarden.org', 'Community garden wi
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Dalston Curve Garden');
 SET @w := (SELECT id FROM websites WHERE name = 'Dalston Curve Garden' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://www.songkick.com/venues/981936-dalston-eastern-curve-garden/calendar', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/981936-dalston-eastern-curve-garden/calendar');
+SELECT @w, 'https://dalstongarden.org/activities/', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://dalstongarden.org/activities/');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Dalston Curve Garden', 'Dalston Curve Garden', '13 Dalston Lane, London E8 3DF', 51.5466, -0.0748, '🌿'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Dalston Curve Garden');
@@ -160,12 +160,12 @@ SET @l := (SELECT id FROM locations WHERE name = 'Dalston Curve Garden' LIMIT 1)
 INSERT IGNORE INTO website_locations (website_id, location_id, is_primary) VALUES (@w, @l, 1);
 
 INSERT INTO websites (name, base_url, description, crawl_frequency, source_type, emoji)
-SELECT 'Bethnal Green Working Men''s Club', 'https://www.songkick.com/venues/9058-bethnal-green-working-mens-club/calendar', 'Cabaret and events club (BGWMC)', 4, 'primary', '🎭'
+SELECT 'Bethnal Green Working Men''s Club', 'https://ma.to/venue/bgwmc', 'Cabaret and events club (BGWMC)', 4, 'primary', '🎭'
 WHERE NOT EXISTS (SELECT 1 FROM websites WHERE name = 'Bethnal Green Working Men''s Club');
 SET @w := (SELECT id FROM websites WHERE name = 'Bethnal Green Working Men''s Club' LIMIT 1);
 INSERT INTO website_urls (website_id, url, sort_order)
-SELECT @w, 'https://www.songkick.com/venues/9058-bethnal-green-working-mens-club/calendar', 0
-WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://www.songkick.com/venues/9058-bethnal-green-working-mens-club/calendar');
+SELECT @w, 'https://ma.to/venue/bgwmc', 0
+WHERE NOT EXISTS (SELECT 1 FROM website_urls WHERE website_id = @w AND url = 'https://ma.to/venue/bgwmc');
 INSERT INTO locations (name, short_name, address, lat, lng, emoji)
 SELECT 'Bethnal Green Working Men''s Club', 'Bethnal Green Working Men''s Club', '42-44 Pollard Row, London E2 6NB', 51.5266, -0.0655, '🎭'
 WHERE NOT EXISTS (SELECT 1 FROM locations WHERE name = 'Bethnal Green Working Men''s Club');
